@@ -2,6 +2,7 @@ import { Router, type IRequest } from "itty-router";
 import type { Env } from "../env";
 import { computeBreakBudgetFromEvents, fetchRecentParticipantEvents } from "../breakBudget";
 import { randomToken } from "../crypto";
+import { renderQrCodeSvg } from "../qrcode";
 
 const PARTICIPANT_TOKEN_BYTES = 20;
 
@@ -47,6 +48,22 @@ checkinRouter.get("/:checkinCode", async (request: IRequest, env: Env) => {
 		return Response.json({ error: "Kurs nicht gefunden" }, { status: 404 });
 	}
 	return Response.json({ course: { name: course.name, dailyBreakBudgetMinutes: course.daily_break_budget_minutes } });
+});
+
+checkinRouter.get("/:checkinCode/qrcode.svg", async (request: IRequest, env: Env) => {
+	const course = await getActiveCourseByCheckinCode(env.DB, request.params.checkinCode);
+	if (!course) {
+		return Response.json({ error: "Kurs nicht gefunden" }, { status: 404 });
+	}
+
+	const checkinUrl = new URL(`/k/${request.params.checkinCode}`, request.url).toString();
+	const svg = renderQrCodeSvg(checkinUrl);
+	return new Response(svg, {
+		headers: {
+			"Content-Type": "image/svg+xml",
+			"Cache-Control": "public, max-age=3600",
+		},
+	});
 });
 
 checkinRouter.post("/:checkinCode/register", async (request: IRequest, env: Env) => {

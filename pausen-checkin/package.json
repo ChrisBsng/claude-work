@@ -18,6 +18,7 @@
 		"wrangler": "^4.142.0"
 	},
 	"dependencies": {
-		"itty-router": "^5.0.24"
+		"itty-router": "^5.0.24",
+		"qrcode-generator": "^2.0.4"
 	}
 }
