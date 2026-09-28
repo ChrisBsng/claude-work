@@ -47,24 +47,41 @@ async function hmacKey(secret: string): Promise<CryptoKey> {
 
 const ADMIN_SESSION_TTL_SECONDS = 60 * 60 * 12;
 
-export async function createAdminSessionToken(secret: string): Promise<string> {
+export type AdminRole = "admin" | "readonly";
+
+// Die Rolle ist Teil der signierten Payload; beim Verifizieren wird je nach
+// eingebetteter Rolle das passende Secret gewählt (ADMIN_PASSWORD bzw.
+// READONLY_PASSWORD). Ein Token kann also nur für die Rolle gültig sein,
+// deren Secret beim Login tatsächlich bekannt war – eine read-only Sitzung
+// kann sich so nicht selbst zu "admin" hochstufen.
+export async function createAdminSessionToken(secret: string, role: AdminRole): Promise<string> {
 	const expiresAt = Math.floor(Date.now() / 1000) + ADMIN_SESSION_TTL_SECONDS;
+	const payload = `${expiresAt}.${role}`;
 	const key = await hmacKey(secret);
-	const signature = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(String(expiresAt)));
-	return `${expiresAt}.${base64UrlEncode(new Uint8Array(signature))}`;
+	const signature = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(payload));
+	return `${payload}.${base64UrlEncode(new Uint8Array(signature))}`;
 }
 
-export async function verifyAdminSessionToken(secret: string, token: string | null): Promise<boolean> {
-	if (!token) return false;
-	const [expiresAtRaw, signature] = token.split(".");
-	if (!expiresAtRaw || !signature) return false;
+export async function verifyAdminSessionToken(
+	secrets: { admin: string; readonly?: string },
+	token: string | null,
+): Promise<AdminRole | null> {
+	if (!token) return null;
+	const parts = token.split(".");
+	if (parts.length !== 3) return null;
+	const [expiresAtRaw, role, signature] = parts;
+	if (role !== "admin" && role !== "readonly") return null;
 
 	const expiresAt = Number(expiresAtRaw);
-	if (!Number.isFinite(expiresAt) || expiresAt < Math.floor(Date.now() / 1000)) return false;
+	if (!Number.isFinite(expiresAt) || expiresAt < Math.floor(Date.now() / 1000)) return null;
 
+	const secret = role === "admin" ? secrets.admin : secrets.readonly;
+	if (!secret) return null;
+
+	const payload = `${expiresAtRaw}.${role}`;
 	const key = await hmacKey(secret);
-	const expectedSignature = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(expiresAtRaw));
-	return constantTimeEqual(base64UrlEncode(new Uint8Array(expectedSignature)), signature);
+	const expectedSignature = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(payload));
+	return constantTimeEqual(base64UrlEncode(new Uint8Array(expectedSignature)), signature) ? role : null;
 }
 
 const PARTICIPANT_PASSWORD_PBKDF2_ITERATIONS = 100_000;

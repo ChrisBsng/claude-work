@@ -38,7 +38,7 @@ async function requestBlob(path, { headers = {} } = {}) {
 }
 
 export const api = {
-	adminLogin: (password) => request("/api/admin/login", { method: "POST", body: { password } }),
+	adminLogin: (password, role) => request("/api/admin/login", { method: "POST", body: { password, role } }),
 	adminListCourses: (token) => request("/api/admin/courses", { headers: { Authorization: `Bearer ${token}` } }),
 	adminCreateCourse: (token, course) =>
 		request("/api/admin/courses", {

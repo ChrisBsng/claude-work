@@ -2,6 +2,7 @@ import { api } from "/api.js";
 import { getBaseUrl } from "/baseUrl.js";
 
 const TOKEN_KEY = "pausenCheckin.adminToken";
+const ROLE_KEY = "pausenCheckin.adminRole";
 const SCHULSTUNDE_MINUTES = 45;
 const OVERTIME_WARNING_TOLERANCE_MINUTES = 5;
 
@@ -29,12 +30,30 @@ function getToken() {
 	return sessionStorage.getItem(TOKEN_KEY);
 }
 
-function setToken(token) {
+function getRole() {
+	return sessionStorage.getItem(ROLE_KEY) === "readonly" ? "readonly" : "admin";
+}
+
+function setSession(token, role) {
 	sessionStorage.setItem(TOKEN_KEY, token);
+	sessionStorage.setItem(ROLE_KEY, role);
 }
 
 function clearToken() {
 	sessionStorage.removeItem(TOKEN_KEY);
+	sessionStorage.removeItem(ROLE_KEY);
+}
+
+// Deaktiviert alle Formularfelder/Buttons in einem Bereich für die
+// Read-Only-Rolle. Schreibende Aktionen, die außerhalb eines <form>
+// liegen (z. B. dynamisch erzeugte Kalender-Buttons), werden erfasst,
+// indem der jeweilige Bereich in ein <form> gewrappt wird – so reicht
+// dieser eine, generische Sweep für die ganze Admin-Oberfläche.
+function lockIfReadOnly(container, role) {
+	if (role !== "readonly") return;
+	container.querySelectorAll("form input, form select, form textarea, form button, [data-write-action]").forEach((el) => {
+		el.disabled = true;
+	});
 }
 
 async function courseUrl(path) {
@@ -62,7 +81,7 @@ export function renderAdmin(root) {
 	root.classList.add("admin-app");
 	const token = getToken();
 	if (token) {
-		renderAdminShell(root, token);
+		renderAdminShell(root, token, getRole());
 	} else {
 		renderLogin(root);
 	}
@@ -74,6 +93,12 @@ function renderLogin(root, message) {
 			<h1>Admin-Bereich</h1>
 			<div class="card">
 				<form id="login-form">
+					<label for="role">Zugriffsart</label>
+					<select id="role">
+						<option value="admin">Admin (voller Zugriff)</option>
+						<option value="readonly">Nur Lesen (Read-Only)</option>
+					</select>
+
 					<label for="password">Passwort</label>
 					<input type="password" id="password" name="password" required autofocus />
 					${message ? `<p class="error">${message}</p>` : ""}
@@ -86,10 +111,11 @@ function renderLogin(root, message) {
 	root.querySelector("#login-form").addEventListener("submit", async (event) => {
 		event.preventDefault();
 		const password = root.querySelector("#password").value;
+		const role = root.querySelector("#role").value;
 		try {
-			const { token } = await api.adminLogin(password);
-			setToken(token);
-			renderAdminShell(root, token);
+			const { token, role: confirmedRole } = await api.adminLogin(password, role);
+			setSession(token, confirmedRole);
+			renderAdminShell(root, token, confirmedRole);
 		} catch (error) {
 			renderLogin(root, error.message);
 		}
@@ -98,11 +124,12 @@ function renderLogin(root, message) {
 
 // --- Shell: Sidebar + Hauptbereich -----------------------------------
 
-async function renderAdminShell(root, token) {
+async function renderAdminShell(root, token, role) {
 	root.innerHTML = `
 		<div class="admin-layout">
 			<nav class="admin-sidebar">
 				<div class="admin-sidebar-title">Admin-Bereich</div>
+				${role === "readonly" ? `<div class="readonly-badge">Nur Lesen (Read-Only)</div>` : ""}
 				<div id="sidebar-tree"></div>
 				<button type="button" class="sidebar-item" id="sidebar-images">Bilder</button>
 				<button type="button" class="sidebar-item" id="sidebar-logout" style="margin-top: 20px; color: var(--color-danger);">Abmelden</button>
@@ -180,11 +207,11 @@ async function renderAdminShell(root, token) {
 	async function renderMain() {
 		const main = root.querySelector("#admin-main");
 		if (state.view === "courses") {
-			await renderCoursesOverview(main, token, { courses, refreshCourses, handleAuthError, navigate });
+			await renderCoursesOverview(main, token, { courses, refreshCourses, handleAuthError, navigate, role });
 		} else if (state.view === "images") {
-			await renderImagesPage(main, token);
+			await renderImagesPage(main, token, role);
 		} else if (state.view === "course") {
-			await renderCourseDetail(main, token, state, { handleAuthError, refreshCourses, navigate });
+			await renderCourseDetail(main, token, state, { handleAuthError, refreshCourses, navigate, role });
 		}
 	}
 
@@ -211,7 +238,7 @@ function courseListRow(course, onSelectionChange, onOpen) {
 	return tr;
 }
 
-async function renderCoursesOverview(container, token, { refreshCourses, handleAuthError, navigate }) {
+async function renderCoursesOverview(container, token, { refreshCourses, handleAuthError, navigate, role }) {
 	container.innerHTML = `
 		<h1>Kurse</h1>
 
@@ -239,13 +266,15 @@ async function renderCoursesOverview(container, token, { refreshCourses, handleA
 		</div>
 
 		<h2>Bestehende Kurse</h2>
-		<div class="link-row" id="bulk-bar" hidden>
-			<strong><span id="selected-count">0</span> ausgewählt</strong>
-			<button type="button" id="bulk-delete" class="secondary" style="color: var(--color-danger); border-color: var(--color-danger);">
-				Endgültig löschen
-			</button>
-		</div>
-		<div id="course-list"><p class="muted">Lädt…</p></div>
+		<form id="course-list-scope">
+			<div class="link-row" id="bulk-bar" hidden>
+				<strong><span id="selected-count">0</span> ausgewählt</strong>
+				<button type="button" id="bulk-delete" class="secondary" style="color: var(--color-danger); border-color: var(--color-danger);">
+					Endgültig löschen
+				</button>
+			</div>
+			<div id="course-list"><p class="muted">Lädt…</p></div>
+		</form>
 	`;
 
 	container.querySelector("#hasBreakTracking").addEventListener("change", (event) => {
@@ -345,6 +374,7 @@ async function renderCoursesOverview(container, token, { refreshCourses, handleA
 	}
 
 	await loadCourseTable();
+	lockIfReadOnly(container, role);
 }
 
 // --- Kurs-Detailansicht mit Tabs ---------------------------------------
@@ -356,7 +386,7 @@ const COURSE_TABS = [
 	{ id: "report", label: "Report / Statistik" },
 ];
 
-async function renderCourseDetail(container, token, state, { handleAuthError, refreshCourses, navigate }) {
+async function renderCourseDetail(container, token, state, { handleAuthError, refreshCourses, navigate, role }) {
 	let course;
 	try {
 		const { courses } = await api.adminListCourses(token);
@@ -389,21 +419,21 @@ async function renderCourseDetail(container, token, state, { handleAuthError, re
 	const tabContent = container.querySelector("#tab-content");
 	const refreshThisCourse = async () => {
 		await refreshCourses();
-		await renderCourseDetail(container, token, state, { handleAuthError, refreshCourses, navigate });
+		await renderCourseDetail(container, token, state, { handleAuthError, refreshCourses, navigate, role });
 	};
 
 	if (activeTab === "overview") {
-		await renderCourseOverviewTab(tabContent, token, course, { handleAuthError, refreshThisCourse });
+		await renderCourseOverviewTab(tabContent, token, course, { handleAuthError, refreshThisCourse, role });
 	} else if (activeTab === "participants") {
-		await renderCourseParticipantsTab(tabContent, token, course, { handleAuthError });
+		await renderCourseParticipantsTab(tabContent, token, course, { handleAuthError, role });
 	} else if (activeTab === "groups") {
-		await renderCourseGroupsTab(tabContent, token, course, { handleAuthError });
+		await renderCourseGroupsTab(tabContent, token, course, { handleAuthError, role });
 	} else if (activeTab === "report") {
-		await renderCourseReportTab(tabContent, token, course, { handleAuthError });
+		await renderCourseReportTab(tabContent, token, course, { handleAuthError, role });
 	}
 }
 
-async function renderCourseOverviewTab(container, token, course, { handleAuthError, refreshThisCourse }) {
+async function renderCourseOverviewTab(container, token, course, { handleAuthError, refreshThisCourse, role }) {
 	const dashboardUrl = await courseUrl(`/d/${course.dashboardToken}`);
 	const checkinUrl = await courseUrl(`/k/${course.checkinCode}`);
 
@@ -486,7 +516,9 @@ async function renderCourseOverviewTab(container, token, course, { handleAuthErr
 	});
 
 	await renderHeaderPanel(container.querySelector("#header-panel"), token, course, refreshThisCourse);
-	await renderWorklogSettingsPanel(container.querySelector("#worklog-panel"), token, course, { handleAuthError, refreshThisCourse });
+	await renderWorklogSettingsPanel(container.querySelector("#worklog-panel"), token, course, { handleAuthError, refreshThisCourse, role });
+
+	lockIfReadOnly(container, role);
 }
 
 async function renderWorklogSettingsPanel(container, token, course, { handleAuthError, refreshThisCourse }) {
@@ -510,29 +542,31 @@ async function renderWorklogSettingsPanel(container, token, course, { handleAuth
 		.join("");
 
 	container.innerHTML = `
-		<div class="toggle-row">
-			<input type="checkbox" id="worklog-enabled" ${course.hasWorklogTracking ? "checked" : ""} />
-			<label for="worklog-enabled">Worklogerfassung aktivieren</label>
-		</div>
-		<div id="worklog-config" ${course.hasWorklogTracking ? "" : "hidden"}>
-			<label for="worklog-schulstunden">Tägliche Arbeitszeit</label>
-			<select id="worklog-schulstunden">${schulstundenOptions}</select>
-
-			<label style="margin-top: 16px;">Projekttage (anklicken zum Auswählen/Abwählen)</label>
-			<div id="worklog-calendar" class="link-row"></div>
-			<p class="muted" id="worklog-total" style="margin-top: 10px;"></p>
-
-			<div class="toggle-row" style="margin-top: 16px;">
-				<input type="checkbox" id="worklog-allow-overtime" ${course.allowOvertimeCredit ? "checked" : ""} />
-				<label for="worklog-allow-overtime">Erlaube Mehrarbeit/Überstunden auf die gesamte Projektzeit anzurechnen</label>
+		<form id="worklog-settings-form">
+			<div class="toggle-row">
+				<input type="checkbox" id="worklog-enabled" ${course.hasWorklogTracking ? "checked" : ""} />
+				<label for="worklog-enabled">Worklogerfassung aktivieren</label>
 			</div>
-			<p class="muted">
-				Ohne dieses Häkchen verfallen Minuten, die an einem Tag mehr als ${OVERTIME_WARNING_TOLERANCE_MINUTES} Minuten über dem
-				Tagesziel liegen – Teilnehmende erhalten beim Eintragen eine Meldung und müssen die Zeit anpassen.
-			</p>
-		</div>
-		<div id="worklog-error"></div>
-		<button type="button" id="worklog-save" style="margin-top: 16px;">Speichern</button>
+			<div id="worklog-config" ${course.hasWorklogTracking ? "" : "hidden"}>
+				<label for="worklog-schulstunden">Tägliche Arbeitszeit</label>
+				<select id="worklog-schulstunden">${schulstundenOptions}</select>
+
+				<label style="margin-top: 16px;">Projekttage (anklicken zum Auswählen/Abwählen)</label>
+				<div id="worklog-calendar" class="link-row"></div>
+				<p class="muted" id="worklog-total" style="margin-top: 10px;"></p>
+
+				<div class="toggle-row" style="margin-top: 16px;">
+					<input type="checkbox" id="worklog-allow-overtime" ${course.allowOvertimeCredit ? "checked" : ""} />
+					<label for="worklog-allow-overtime">Erlaube Mehrarbeit/Überstunden auf die gesamte Projektzeit anzurechnen</label>
+				</div>
+				<p class="muted">
+					Ohne dieses Häkchen verfallen Minuten, die an einem Tag mehr als ${OVERTIME_WARNING_TOLERANCE_MINUTES} Minuten über dem
+					Tagesziel liegen – Teilnehmende erhalten beim Eintragen eine Meldung und müssen die Zeit anpassen.
+				</p>
+			</div>
+			<div id="worklog-error"></div>
+			<button type="button" id="worklog-save" style="margin-top: 16px;">Speichern</button>
+		</form>
 	`;
 
 	const configSection = container.querySelector("#worklog-config");
@@ -636,12 +670,14 @@ async function renderHeaderPanel(container, token, course, onSaved) {
 	].join("");
 
 	container.innerHTML = `
-		<label for="header-left-select">Logo links</label>
-		<select id="header-left-select">${leftOptions}</select>
-		<label for="header-right-select">Logo rechts</label>
-		<select id="header-right-select">${rightOptions}</select>
-		<div id="header-save-error"></div>
-		<button type="button" id="header-save">Speichern</button>
+		<form id="header-form">
+			<label for="header-left-select">Logo links</label>
+			<select id="header-left-select">${leftOptions}</select>
+			<label for="header-right-select">Logo rechts</label>
+			<select id="header-right-select">${rightOptions}</select>
+			<div id="header-save-error"></div>
+			<button type="button" id="header-save">Speichern</button>
+		</form>
 		<p class="muted" style="margin-top: 10px;">Neue Bilder hochladen: siehe Sidebar „Bilder“.</p>
 	`;
 
@@ -668,7 +704,7 @@ async function renderHeaderPanel(container, token, course, onSaved) {
 
 // --- Tab: Teilnehmer ---------------------------------------------------
 
-async function renderCourseParticipantsTab(container, token, course, { handleAuthError }) {
+async function renderCourseParticipantsTab(container, token, course, { handleAuthError, role }) {
 	container.innerHTML = `<p class="muted">Lädt…</p>`;
 
 	let participants;
@@ -710,7 +746,7 @@ async function renderCourseParticipantsTab(container, token, course, { handleAut
 				<td>${participant.name}</td>
 				<td>${participant.groupName ?? "–"}</td>
 				<td>${new Date(participant.createdAt).toLocaleString("de-DE")}</td>
-				<td><button type="button" class="secondary" data-edit>Bearbeiten</button></td>
+				<td><button type="button" class="secondary" data-edit data-write-action>Bearbeiten</button></td>
 			`;
 			tr.querySelector("[data-edit]").addEventListener("click", renderEdit);
 		};
@@ -775,11 +811,12 @@ async function renderCourseParticipantsTab(container, token, course, { handleAut
 
 	container.innerHTML = "";
 	container.appendChild(table);
+	lockIfReadOnly(container, role);
 }
 
 // --- Tab: Gruppen -------------------------------------------------------
 
-async function renderCourseGroupsTab(container, token, course, { handleAuthError }) {
+async function renderCourseGroupsTab(container, token, course, { handleAuthError, role }) {
 	container.innerHTML = `
 		<div class="card">
 			<h2>Neue Gruppe anlegen</h2>
@@ -832,11 +869,11 @@ async function renderCourseGroupsTab(container, token, course, { handleAuthError
 		groups.forEach((group) => {
 			const tr = document.createElement("tr");
 			tr.innerHTML = `
-				<td><input type="text" value="${group.name}" data-name-input /></td>
+				<td><input type="text" value="${group.name}" data-name-input data-write-action /></td>
 				<td>${group.memberCount}</td>
 				<td>
-					<button type="button" class="secondary" data-rename>Umbenennen</button>
-					<button type="button" class="secondary" data-delete style="color: var(--color-danger); border-color: var(--color-danger);">Löschen</button>
+					<button type="button" class="secondary" data-rename data-write-action>Umbenennen</button>
+					<button type="button" class="secondary" data-delete data-write-action style="color: var(--color-danger); border-color: var(--color-danger);">Löschen</button>
 				</td>
 			`;
 			tr.querySelector("[data-rename]").addEventListener("click", async () => {
@@ -867,9 +904,11 @@ async function renderCourseGroupsTab(container, token, course, { handleAuthError
 
 		list.innerHTML = "";
 		list.appendChild(table);
+		lockIfReadOnly(container, role);
 	}
 
 	await loadGroups();
+	lockIfReadOnly(container, role);
 }
 
 // --- Tab: Report / Statistik --------------------------------------------
@@ -998,7 +1037,7 @@ async function renderWorklogReport(container, token, course, { handleAuthError }
 
 // --- "Bilder"-Seite (Bild-Repository) ------------------------------------
 
-async function renderImagesPage(container, token) {
+async function renderImagesPage(container, token, role) {
 	container.innerHTML = `
 		<h1>Bilder</h1>
 		<div class="card">
@@ -1007,7 +1046,7 @@ async function renderImagesPage(container, token) {
 				linkes Logo verwendet, solange ein Kurs kein eigenes festgelegt hat.
 			</p>
 			<label for="image-upload">Neues Bild hochladen (PNG, JPEG, WebP, GIF, SVG – max. 5 MB)</label>
-			<input type="file" id="image-upload" accept="image/png,image/jpeg,image/webp,image/gif,image/svg+xml" />
+			<input type="file" id="image-upload" accept="image/png,image/jpeg,image/webp,image/gif,image/svg+xml" data-write-action />
 			<div id="image-upload-error"></div>
 			<div id="image-grid" class="image-grid"></div>
 		</div>
@@ -1033,8 +1072,8 @@ async function renderImagesPage(container, token) {
 					<img src="${image.url}" alt="${image.filename}" />
 					<div class="filename">${image.filename}${isDefault ? " ⭐ Standard" : ""}</div>
 					<div class="actions">
-						${isDefault ? "" : `<button type="button" class="secondary" data-set-default>Als Standard (links)</button>`}
-						<button type="button" class="secondary" data-delete style="color: var(--color-danger); border-color: var(--color-danger);">Löschen</button>
+						${isDefault ? "" : `<button type="button" class="secondary" data-set-default data-write-action>Als Standard (links)</button>`}
+						<button type="button" class="secondary" data-delete data-write-action style="color: var(--color-danger); border-color: var(--color-danger);">Löschen</button>
 					</div>
 				`;
 				tile.querySelector("[data-set-default]")?.addEventListener("click", async () => {
@@ -1050,6 +1089,8 @@ async function renderImagesPage(container, token) {
 			});
 		} catch (error) {
 			grid.innerHTML = `<p class="error">${error.message}</p>`;
+		} finally {
+			lockIfReadOnly(container, role);
 		}
 	}
 

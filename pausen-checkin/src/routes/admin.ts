@@ -1,6 +1,6 @@
 import { Router, type IRequest } from "itty-router";
 import type { Env } from "../env";
-import { createAdminSessionToken, randomToken, verifyAdminSessionToken, verifyPassword } from "../crypto";
+import { type AdminRole, createAdminSessionToken, randomToken, verifyAdminSessionToken, verifyPassword } from "../crypto";
 import {
 	addDaysToDateString,
 	computeBreakBudgetFromEvents,
@@ -67,26 +67,34 @@ function serializeCourse(course: CourseRow, defaultHeaderLeftImageId: string | n
 	};
 }
 
-async function requireAdmin(request: IRequest, env: Env): Promise<Response | void> {
+async function requireRole(request: IRequest, env: Env, allowedRoles: AdminRole[]): Promise<Response | void> {
 	const authHeader = request.headers.get("Authorization") ?? "";
 	const token = authHeader.startsWith("Bearer ") ? authHeader.slice("Bearer ".length) : null;
-	if (!(await verifyAdminSessionToken(env.ADMIN_PASSWORD, token))) {
+	const role = await verifyAdminSessionToken({ admin: env.ADMIN_PASSWORD, readonly: env.READONLY_PASSWORD }, token);
+	if (!role || !allowedRoles.includes(role)) {
 		return Response.json({ error: "Nicht autorisiert" }, { status: 401 });
 	}
 }
 
+// Volle Rechte (Anlegen/Ändern/Löschen).
+const requireAdmin = (request: IRequest, env: Env) => requireRole(request, env, ["admin"]);
+// Lesender Zugriff, für Admin UND Read-Only-Rolle.
+const requireReadAccess = (request: IRequest, env: Env) => requireRole(request, env, ["admin", "readonly"]);
+
 export const adminRouter = Router({ base: "/api/admin" });
 
 adminRouter.post("/login", async (request: IRequest, env: Env) => {
-	const body = (await request.json().catch(() => null)) as { password?: string } | null;
-	if (!body?.password || !(await verifyPassword(env.ADMIN_PASSWORD, body.password))) {
+	const body = (await request.json().catch(() => null)) as { password?: string; role?: string } | null;
+	const role: AdminRole = body?.role === "readonly" ? "readonly" : "admin";
+	const secret = role === "admin" ? env.ADMIN_PASSWORD : env.READONLY_PASSWORD;
+	if (!secret || !body?.password || !(await verifyPassword(secret, body.password))) {
 		return Response.json({ error: "Ungültiges Passwort" }, { status: 401 });
 	}
-	const token = await createAdminSessionToken(env.ADMIN_PASSWORD);
-	return Response.json({ token });
+	const token = await createAdminSessionToken(secret, role);
+	return Response.json({ token, role });
 });
 
-adminRouter.get("/courses", requireAdmin, async (_request: IRequest, env: Env) => {
+adminRouter.get("/courses", requireReadAccess, async (_request: IRequest, env: Env) => {
 	const { results } = await env.DB.prepare(`SELECT ${COURSE_COLUMNS} FROM courses ORDER BY created_at DESC`).all<CourseRow>();
 	const defaultHeaderLeftImageId = await loadDefaultHeaderLeftImageId(env.DB);
 	return Response.json({ courses: results.map((c) => serializeCourse(c, defaultHeaderLeftImageId)) });
@@ -293,7 +301,7 @@ async function loadCourseOr404(db: D1Database, id: number): Promise<CourseRow | 
 		.first<CourseRow>();
 }
 
-adminRouter.get("/courses/:id/stats", requireAdmin, async (request: IRequest, env: Env) => {
+adminRouter.get("/courses/:id/stats", requireReadAccess, async (request: IRequest, env: Env) => {
 	const course = await loadCourseOr404(env.DB, Number(request.params.id));
 	if (!course) {
 		return Response.json({ error: "Kurs nicht gefunden" }, { status: 404 });
@@ -312,7 +320,7 @@ adminRouter.get("/courses/:id/stats", requireAdmin, async (request: IRequest, en
 	return Response.json({ participantCount: participants.length, totalBreakMinutes });
 });
 
-adminRouter.get("/courses/:id/export.xlsx", requireAdmin, async (request: IRequest, env: Env) => {
+adminRouter.get("/courses/:id/export.xlsx", requireReadAccess, async (request: IRequest, env: Env) => {
 	const course = await loadCourseOr404(env.DB, Number(request.params.id));
 	if (!course) {
 		return Response.json({ error: "Kurs nicht gefunden" }, { status: 404 });
@@ -451,7 +459,7 @@ interface GroupRow {
 	created_at: string;
 }
 
-adminRouter.get("/courses/:id/groups", requireAdmin, async (request: IRequest, env: Env) => {
+adminRouter.get("/courses/:id/groups", requireReadAccess, async (request: IRequest, env: Env) => {
 	const course = await loadCourseOr404(env.DB, Number(request.params.id));
 	if (!course) {
 		return Response.json({ error: "Kurs nicht gefunden" }, { status: 404 });
@@ -539,7 +547,7 @@ interface ParticipantAdminRow {
 	created_at: string;
 }
 
-adminRouter.get("/courses/:id/participants", requireAdmin, async (request: IRequest, env: Env) => {
+adminRouter.get("/courses/:id/participants", requireReadAccess, async (request: IRequest, env: Env) => {
 	const course = await loadCourseOr404(env.DB, Number(request.params.id));
 	if (!course) {
 		return Response.json({ error: "Kurs nicht gefunden" }, { status: 404 });
@@ -634,7 +642,7 @@ adminRouter.post("/participants/:id/reset-password", requireAdmin, async (reques
 
 // --- Projekttage & Worklog ---
 
-adminRouter.get("/courses/:id/project-days", requireAdmin, async (request: IRequest, env: Env) => {
+adminRouter.get("/courses/:id/project-days", requireReadAccess, async (request: IRequest, env: Env) => {
 	const course = await loadCourseOr404(env.DB, Number(request.params.id));
 	if (!course) {
 		return Response.json({ error: "Kurs nicht gefunden" }, { status: 404 });
@@ -782,7 +790,7 @@ async function buildWorklogReport(db: D1Database, course: CourseRow) {
 	};
 }
 
-adminRouter.get("/courses/:id/worklog-report", requireAdmin, async (request: IRequest, env: Env) => {
+adminRouter.get("/courses/:id/worklog-report", requireReadAccess, async (request: IRequest, env: Env) => {
 	const course = await loadCourseOr404(env.DB, Number(request.params.id));
 	if (!course) {
 		return Response.json({ error: "Kurs nicht gefunden" }, { status: 404 });
@@ -815,7 +823,7 @@ function serializeImage(image: ImageRow) {
 	};
 }
 
-adminRouter.get("/images", requireAdmin, async (_request: IRequest, env: Env) => {
+adminRouter.get("/images", requireReadAccess, async (_request: IRequest, env: Env) => {
 	const { results } = await env.DB.prepare("SELECT * FROM images ORDER BY uploaded_at DESC").all<ImageRow>();
 	const defaultHeaderLeftImageId = await loadDefaultHeaderLeftImageId(env.DB);
 	return Response.json({ images: results.map(serializeImage), defaultHeaderLeftImageId });

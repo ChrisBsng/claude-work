@@ -54,5 +54,7 @@ jobs:
           command: deploy --var CUSTOM_DOMAIN:${{ vars.CUSTOM_DOMAIN }}
           secrets: |
             ADMIN_PASSWORD
+            READONLY_PASSWORD
         env:
           ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD }}
+          READONLY_PASSWORD: ${{ secrets.READONLY_PASSWORD }}
