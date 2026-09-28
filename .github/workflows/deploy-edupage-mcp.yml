@@ -42,13 +42,3 @@ jobs:
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           workingDirectory: edupage-mcp
           command: deploy
-          secrets: |
-            EDUPAGE_SUBDOMAIN
-            EDUPAGE_USERNAME
-            EDUPAGE_PASSWORD
-            MCP_AUTH_TOKEN
-        env:
-          EDUPAGE_SUBDOMAIN: ${{ secrets.EDUPAGE_SUBDOMAIN }}
-          EDUPAGE_USERNAME: ${{ secrets.EDUPAGE_USERNAME }}
-          EDUPAGE_PASSWORD: ${{ secrets.EDUPAGE_PASSWORD }}
-          MCP_AUTH_TOKEN: ${{ secrets.MCP_AUTH_TOKEN }}
