@@ -1,10 +1,11 @@
 import { Router, type IRequest } from "itty-router";
 import type { Env } from "../env";
-import { computeBreakBudgetFromEvents, fetchRecentParticipantEvents, type BreakBudgetResult } from "../breakBudget";
+import { computeBreakBudgetFromEvents, fetchRecentParticipantEvents, localDateString, type BreakBudgetResult } from "../breakBudget";
 import { hashParticipantPassword, randomToken, verifyParticipantPassword } from "../crypto";
 import { resolveBaseUrl } from "../baseUrl";
 import { resolveHeaderImageIds } from "../images";
 import { renderQrCodeSvg } from "../qrcode";
+import { isValidDateString } from "../worklog";
 
 const PARTICIPANT_TOKEN_BYTES = 20;
 const MIN_PASSWORD_LENGTH = 4;
@@ -19,6 +20,7 @@ interface CourseRow {
 	header_right_image_id: string | null;
 	has_break_tracking: number;
 	has_worklog_tracking: number;
+	daily_worklog_minutes: number | null;
 }
 
 type ParticipantStatus = "present" | "on_break" | "unknown";
@@ -28,13 +30,14 @@ interface ParticipantRow {
 	name: string;
 	access_token: string;
 	password_hash: string | null;
+	group_id: number | null;
 }
 
 async function getActiveCourseByCheckinCode(db: D1Database, checkinCode: string): Promise<CourseRow | null> {
 	const course = await db
 		.prepare(
 			`SELECT id, name, daily_break_budget_minutes, timezone, is_active, header_left_image_id, header_right_image_id,
-			 has_break_tracking, has_worklog_tracking
+			 has_break_tracking, has_worklog_tracking, daily_worklog_minutes
 			 FROM courses WHERE checkin_code = ?1`,
 		)
 		.bind(checkinCode)
@@ -44,9 +47,25 @@ async function getActiveCourseByCheckinCode(db: D1Database, checkinCode: string)
 
 async function getParticipantByToken(db: D1Database, courseId: number, accessToken: string): Promise<ParticipantRow | null> {
 	return db
-		.prepare("SELECT id, name, access_token, password_hash FROM participants WHERE course_id = ?1 AND access_token = ?2")
+		.prepare("SELECT id, name, access_token, password_hash, group_id FROM participants WHERE course_id = ?1 AND access_token = ?2")
 		.bind(courseId, accessToken)
 		.first<ParticipantRow>();
+}
+
+async function requireParticipant(
+	request: IRequest,
+	env: Env,
+	course: CourseRow,
+): Promise<{ participant: ParticipantRow } | { error: Response }> {
+	const accessToken = request.headers.get("X-Access-Token");
+	if (!accessToken) {
+		return { error: Response.json({ error: "Kein Zugriffs-Token" }, { status: 401 }) };
+	}
+	const participant = await getParticipantByToken(env.DB, course.id, accessToken);
+	if (!participant) {
+		return { error: Response.json({ error: "Teilnehmer nicht gefunden" }, { status: 404 }) };
+	}
+	return { participant };
 }
 
 // Status wird immer frisch aus dem Event-Log abgeleitet (tagesbezogen),
@@ -80,6 +99,7 @@ checkinRouter.get("/:checkinCode", async (request: IRequest, env: Env) => {
 			headerRightImageId: rightImageId,
 			hasBreakTracking: Boolean(course.has_break_tracking),
 			hasWorklogTracking: Boolean(course.has_worklog_tracking),
+			dailyWorklogMinutes: course.daily_worklog_minutes,
 		},
 	});
 });
@@ -210,17 +230,10 @@ checkinRouter.get("/:checkinCode/me", async (request: IRequest, env: Env) => {
 		return Response.json({ error: "Kurs nicht gefunden" }, { status: 404 });
 	}
 
-	const accessToken = request.headers.get("X-Access-Token");
-	if (!accessToken) {
-		return Response.json({ error: "Kein Zugriffs-Token" }, { status: 401 });
-	}
+	const auth = await requireParticipant(request, env, course);
+	if ("error" in auth) return auth.error;
 
-	const participant = await getParticipantByToken(env.DB, course.id, accessToken);
-	if (!participant) {
-		return Response.json({ error: "Teilnehmer nicht gefunden" }, { status: 404 });
-	}
-
-	return Response.json(await loadParticipantView(env.DB, participant, course));
+	return Response.json(await loadParticipantView(env.DB, auth.participant, course));
 });
 
 // Ohne body: normaler Toggle (present<->on_break) anhand des aktuellen,
@@ -233,15 +246,9 @@ checkinRouter.post("/:checkinCode/toggle", async (request: IRequest, env: Env) =
 		return Response.json({ error: "Kurs nicht gefunden" }, { status: 404 });
 	}
 
-	const accessToken = request.headers.get("X-Access-Token");
-	if (!accessToken) {
-		return Response.json({ error: "Kein Zugriffs-Token" }, { status: 401 });
-	}
-
-	const participant = await getParticipantByToken(env.DB, course.id, accessToken);
-	if (!participant) {
-		return Response.json({ error: "Teilnehmer nicht gefunden" }, { status: 404 });
-	}
+	const auth = await requireParticipant(request, env, course);
+	if ("error" in auth) return auth.error;
+	const participant = auth.participant;
 
 	const body = (await request.json().catch(() => null)) as { status?: string } | null;
 	const requestedStatus = body?.status === "present" || body?.status === "on_break" ? body.status : null;
@@ -263,4 +270,205 @@ checkinRouter.post("/:checkinCode/toggle", async (request: IRequest, env: Env) =
 	]);
 
 	return Response.json(await loadParticipantView(env.DB, participant, course));
+});
+
+// --- Worklog ---
+
+interface WorklogEntryRow {
+	id: number;
+	task: string;
+	minutes: number;
+}
+
+function requireWorklogEnabled(course: CourseRow): Response | null {
+	if (!course.has_worklog_tracking || !course.daily_worklog_minutes) {
+		return Response.json({ error: "Worklogerfassung ist für diesen Kurs nicht aktiviert." }, { status: 400 });
+	}
+	return null;
+}
+
+async function isProjectDay(db: D1Database, courseId: number, date: string): Promise<boolean> {
+	const row = await db.prepare("SELECT 1 FROM project_days WHERE course_id = ?1 AND date = ?2").bind(courseId, date).first();
+	return Boolean(row);
+}
+
+// Projekttage mit Gesamtzeit/Vollständigkeit der aktuell angemeldeten
+// Person – Grundlage für die Tagesauswahl auf der Worklog-Seite
+// ("vergangene Projekttage", rot markiert wenn unvollständig).
+checkinRouter.get("/:checkinCode/worklog/days", async (request: IRequest, env: Env) => {
+	const course = await getActiveCourseByCheckinCode(env.DB, request.params.checkinCode);
+	if (!course) {
+		return Response.json({ error: "Kurs nicht gefunden" }, { status: 404 });
+	}
+	const disabled = requireWorklogEnabled(course);
+	if (disabled) return disabled;
+
+	const auth = await requireParticipant(request, env, course);
+	if ("error" in auth) return auth.error;
+
+	const todayLocal = localDateString(new Date(), course.timezone);
+	const { results: projectDays } = await env.DB.prepare(
+		"SELECT date FROM project_days WHERE course_id = ?1 AND date <= ?2 ORDER BY date ASC",
+	)
+		.bind(course.id, todayLocal)
+		.all<{ date: string }>();
+
+	const { results: entries } = await env.DB.prepare(
+		"SELECT date, SUM(minutes) AS total FROM worklog_entries WHERE participant_id = ?1 GROUP BY date",
+	)
+		.bind(auth.participant.id)
+		.all<{ date: string; total: number }>();
+	const totalsByDate = new Map(entries.map((e) => [e.date, e.total]));
+
+	const target = course.daily_worklog_minutes!;
+	const days = projectDays.map((d) => {
+		const totalMinutes = totalsByDate.get(d.date) ?? 0;
+		return { date: d.date, totalMinutes, isComplete: totalMinutes >= target };
+	});
+
+	return Response.json({ dailyWorklogMinutes: target, today: todayLocal, days });
+});
+
+// Bereits verwendete Tasks derselben Gruppe, neueste zuerst – Grundlage
+// für die Task-Dropdownbox beim Erfassen eines neuen Eintrags.
+checkinRouter.get("/:checkinCode/worklog/tasks", async (request: IRequest, env: Env) => {
+	const course = await getActiveCourseByCheckinCode(env.DB, request.params.checkinCode);
+	if (!course) {
+		return Response.json({ error: "Kurs nicht gefunden" }, { status: 404 });
+	}
+	const disabled = requireWorklogEnabled(course);
+	if (disabled) return disabled;
+
+	const auth = await requireParticipant(request, env, course);
+	if ("error" in auth) return auth.error;
+
+	if (auth.participant.group_id === null) {
+		return Response.json({ tasks: [] });
+	}
+
+	const { results } = await env.DB.prepare(
+		`SELECT w.task, MAX(w.created_at) AS last_used
+		 FROM worklog_entries w JOIN participants p ON p.id = w.participant_id
+		 WHERE p.group_id = ?1
+		 GROUP BY w.task
+		 ORDER BY last_used DESC
+		 LIMIT 50`,
+	)
+		.bind(auth.participant.group_id)
+		.all<{ task: string; last_used: string }>();
+
+	return Response.json({ tasks: results.map((r) => r.task) });
+});
+
+async function loadWorklogDay(db: D1Database, participantId: number, date: string, targetMinutes: number) {
+	const { results: entries } = await db
+		.prepare("SELECT id, task, minutes FROM worklog_entries WHERE participant_id = ?1 AND date = ?2 ORDER BY created_at ASC")
+		.bind(participantId, date)
+		.all<WorklogEntryRow>();
+	const totalMinutes = entries.reduce((sum, e) => sum + e.minutes, 0);
+	return { date, entries, totalMinutes, targetMinutes, isComplete: totalMinutes >= targetMinutes };
+}
+
+checkinRouter.get("/:checkinCode/worklog/:date", async (request: IRequest, env: Env) => {
+	const course = await getActiveCourseByCheckinCode(env.DB, request.params.checkinCode);
+	if (!course) {
+		return Response.json({ error: "Kurs nicht gefunden" }, { status: 404 });
+	}
+	const disabled = requireWorklogEnabled(course);
+	if (disabled) return disabled;
+	if (!isValidDateString(request.params.date)) {
+		return Response.json({ error: "Ungültiges Datum" }, { status: 400 });
+	}
+
+	const auth = await requireParticipant(request, env, course);
+	if ("error" in auth) return auth.error;
+
+	return Response.json(await loadWorklogDay(env.DB, auth.participant.id, request.params.date, course.daily_worklog_minutes!));
+});
+
+checkinRouter.post("/:checkinCode/worklog/:date", async (request: IRequest, env: Env) => {
+	const course = await getActiveCourseByCheckinCode(env.DB, request.params.checkinCode);
+	if (!course) {
+		return Response.json({ error: "Kurs nicht gefunden" }, { status: 404 });
+	}
+	const disabled = requireWorklogEnabled(course);
+	if (disabled) return disabled;
+
+	const date = request.params.date;
+	const todayLocal = localDateString(new Date(), course.timezone);
+	if (!isValidDateString(date) || date > todayLocal) {
+		return Response.json({ error: "Ungültiges Datum" }, { status: 400 });
+	}
+	if (!(await isProjectDay(env.DB, course.id, date))) {
+		return Response.json({ error: "Dieser Tag ist kein Projekttag." }, { status: 400 });
+	}
+
+	const auth = await requireParticipant(request, env, course);
+	if ("error" in auth) return auth.error;
+
+	const body = (await request.json().catch(() => null)) as { task?: string; minutes?: number } | null;
+	const task = body?.task?.trim();
+	const minutes = Number(body?.minutes);
+	if (!task || !Number.isInteger(minutes) || minutes < 0) {
+		return Response.json({ error: "Task und eine Zeit (Minuten, ≥ 0) sind erforderlich." }, { status: 400 });
+	}
+
+	await env.DB.prepare("INSERT INTO worklog_entries (participant_id, course_id, date, task, minutes) VALUES (?1, ?2, ?3, ?4, ?5)")
+		.bind(auth.participant.id, course.id, date, task, minutes)
+		.run();
+
+	return Response.json(await loadWorklogDay(env.DB, auth.participant.id, date, course.daily_worklog_minutes!), { status: 201 });
+});
+
+checkinRouter.patch("/:checkinCode/worklog/:date/:entryId", async (request: IRequest, env: Env) => {
+	const course = await getActiveCourseByCheckinCode(env.DB, request.params.checkinCode);
+	if (!course) {
+		return Response.json({ error: "Kurs nicht gefunden" }, { status: 404 });
+	}
+	const disabled = requireWorklogEnabled(course);
+	if (disabled) return disabled;
+
+	const auth = await requireParticipant(request, env, course);
+	if ("error" in auth) return auth.error;
+
+	const entryId = Number(request.params.entryId);
+	const owned = await env.DB.prepare("SELECT id FROM worklog_entries WHERE id = ?1 AND participant_id = ?2")
+		.bind(entryId, auth.participant.id)
+		.first();
+	if (!owned) {
+		return Response.json({ error: "Eintrag nicht gefunden" }, { status: 404 });
+	}
+
+	const body = (await request.json().catch(() => null)) as { task?: string; minutes?: number } | null;
+	const task = body?.task?.trim();
+	const minutes = body?.minutes !== undefined ? Number(body.minutes) : undefined;
+	if (minutes !== undefined && (!Number.isInteger(minutes) || minutes < 0)) {
+		return Response.json({ error: "Zeit muss eine ganze Zahl ≥ 0 sein." }, { status: 400 });
+	}
+
+	await env.DB.prepare(
+		`UPDATE worklog_entries SET task = COALESCE(?1, task), minutes = COALESCE(?2, minutes), updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+		 WHERE id = ?3`,
+	)
+		.bind(task || null, minutes ?? null, entryId)
+		.run();
+
+	return Response.json(await loadWorklogDay(env.DB, auth.participant.id, request.params.date, course.daily_worklog_minutes!));
+});
+
+checkinRouter.delete("/:checkinCode/worklog/:date/:entryId", async (request: IRequest, env: Env) => {
+	const course = await getActiveCourseByCheckinCode(env.DB, request.params.checkinCode);
+	if (!course) {
+		return Response.json({ error: "Kurs nicht gefunden" }, { status: 404 });
+	}
+	const disabled = requireWorklogEnabled(course);
+	if (disabled) return disabled;
+
+	const auth = await requireParticipant(request, env, course);
+	if ("error" in auth) return auth.error;
+
+	const entryId = Number(request.params.entryId);
+	await env.DB.prepare("DELETE FROM worklog_entries WHERE id = ?1 AND participant_id = ?2").bind(entryId, auth.participant.id).run();
+
+	return Response.json(await loadWorklogDay(env.DB, auth.participant.id, request.params.date, course.daily_worklog_minutes!));
 });

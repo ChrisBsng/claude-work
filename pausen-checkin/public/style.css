@@ -435,3 +435,57 @@ nav.top a {
 	text-decoration: none;
 	font-weight: 600;
 }
+
+.data-table {
+	font-size: 0.9rem;
+}
+
+.day-chip {
+	display: inline-block;
+	width: 10px;
+	height: 10px;
+	border-radius: 3px;
+	margin: 1px;
+}
+
+.day-chip.is-complete {
+	background: var(--color-present);
+}
+
+.day-chip.is-incomplete {
+	background: var(--color-danger);
+}
+
+.worklog-day-btn.is-incomplete {
+	border-color: var(--color-danger);
+	color: var(--color-danger);
+}
+
+.worklog-day-btn.is-selected {
+	background: var(--color-primary);
+	color: var(--color-primary-contrast);
+}
+
+.worklog-entry-row {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	padding: 8px 0;
+	border-bottom: 1px solid var(--color-border);
+}
+
+.worklog-entry-row .task {
+	flex: 1;
+}
+
+.worklog-total-badge {
+	font-weight: 600;
+}
+
+.worklog-total-badge.is-incomplete {
+	color: var(--color-danger);
+}
+
+.worklog-total-badge.is-complete {
+	color: var(--color-present);
+}

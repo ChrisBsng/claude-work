@@ -11,6 +11,7 @@ import {
 } from "../breakBudget";
 import { buildXlsx, type XlsxCell, type XlsxSheet } from "../xlsx";
 import { isAllowedImageType, MAX_IMAGE_UPLOAD_BYTES } from "../images";
+import { isValidDailyWorklogMinutes, isValidDateString, SCHULSTUNDE_MINUTES } from "../worklog";
 
 const CHECKIN_CODE_BYTES = 6;
 const DASHBOARD_TOKEN_BYTES = 20;
@@ -31,10 +32,11 @@ interface CourseRow {
 	header_right_image_id: string | null;
 	has_break_tracking: number;
 	has_worklog_tracking: number;
+	daily_worklog_minutes: number | null;
 }
 
 const COURSE_COLUMNS =
-	"id, name, start_date, duration_days, daily_break_budget_minutes, timezone, checkin_code, dashboard_token, is_active, created_at, header_left_image_id, header_right_image_id, has_break_tracking, has_worklog_tracking";
+	"id, name, start_date, duration_days, daily_break_budget_minutes, timezone, checkin_code, dashboard_token, is_active, created_at, header_left_image_id, header_right_image_id, has_break_tracking, has_worklog_tracking, daily_worklog_minutes";
 
 async function loadDefaultHeaderLeftImageId(db: D1Database): Promise<string | null> {
 	const setting = await db
@@ -59,6 +61,7 @@ function serializeCourse(course: CourseRow, defaultHeaderLeftImageId: string | n
 		headerRightImageId: course.header_right_image_id,
 		hasBreakTracking: Boolean(course.has_break_tracking),
 		hasWorklogTracking: Boolean(course.has_worklog_tracking),
+		dailyWorklogMinutes: course.daily_worklog_minutes,
 	};
 }
 
@@ -95,6 +98,7 @@ adminRouter.post("/courses", requireAdmin, async (request: IRequest, env: Env) =
 				dailyBreakBudgetMinutes?: number;
 				hasBreakTracking?: boolean;
 				hasWorklogTracking?: boolean;
+				dailyWorklogMinutes?: number;
 		  }
 		| null;
 
@@ -103,6 +107,7 @@ adminRouter.post("/courses", requireAdmin, async (request: IRequest, env: Env) =
 	const dailyBreakBudgetMinutes = Number(body?.dailyBreakBudgetMinutes);
 	const hasBreakTracking = body?.hasBreakTracking ?? true;
 	const hasWorklogTracking = body?.hasWorklogTracking ?? false;
+	const dailyWorklogMinutes = body?.dailyWorklogMinutes !== undefined ? Number(body.dailyWorklogMinutes) : null;
 
 	if (
 		!name ||
@@ -119,16 +124,31 @@ adminRouter.post("/courses", requireAdmin, async (request: IRequest, env: Env) =
 			{ status: 400 },
 		);
 	}
+	if (hasWorklogTracking && (dailyWorklogMinutes === null || !isValidDailyWorklogMinutes(dailyWorklogMinutes))) {
+		return Response.json(
+			{ error: `Bei aktivierter Worklogerfassung ist eine tägliche Arbeitszeit (1–12 Schulstunden à ${SCHULSTUNDE_MINUTES} Min.) erforderlich.` },
+			{ status: 400 },
+		);
+	}
 
 	const checkinCode = randomToken(CHECKIN_CODE_BYTES);
 	const dashboardToken = randomToken(DASHBOARD_TOKEN_BYTES);
 
 	const course = await env.DB.prepare(
-		`INSERT INTO courses (name, duration_days, daily_break_budget_minutes, checkin_code, dashboard_token, has_break_tracking, has_worklog_tracking)
-		 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+		`INSERT INTO courses (name, duration_days, daily_break_budget_minutes, checkin_code, dashboard_token, has_break_tracking, has_worklog_tracking, daily_worklog_minutes)
+		 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
 		 RETURNING ${COURSE_COLUMNS}`,
 	)
-		.bind(name, durationDays, dailyBreakBudgetMinutes, checkinCode, dashboardToken, hasBreakTracking ? 1 : 0, hasWorklogTracking ? 1 : 0)
+		.bind(
+			name,
+			durationDays,
+			dailyBreakBudgetMinutes,
+			checkinCode,
+			dashboardToken,
+			hasBreakTracking ? 1 : 0,
+			hasWorklogTracking ? 1 : 0,
+			hasWorklogTracking ? dailyWorklogMinutes : null,
+		)
 		.first<CourseRow>();
 
 	const defaultHeaderLeftImageId = await loadDefaultHeaderLeftImageId(env.DB);
@@ -150,6 +170,7 @@ adminRouter.patch("/courses/:id", requireAdmin, async (request: IRequest, env: E
 				dailyBreakBudgetMinutes?: number;
 				hasBreakTracking?: boolean;
 				hasWorklogTracking?: boolean;
+				dailyWorklogMinutes?: number;
 		  }
 		| null;
 	if (!body) {
@@ -162,6 +183,8 @@ adminRouter.patch("/courses/:id", requireAdmin, async (request: IRequest, env: E
 		body.dailyBreakBudgetMinutes !== undefined ? Number(body.dailyBreakBudgetMinutes) : course.daily_break_budget_minutes;
 	const hasBreakTracking = body.hasBreakTracking !== undefined ? body.hasBreakTracking : Boolean(course.has_break_tracking);
 	const hasWorklogTracking = body.hasWorklogTracking !== undefined ? body.hasWorklogTracking : Boolean(course.has_worklog_tracking);
+	const dailyWorklogMinutes =
+		body.dailyWorklogMinutes !== undefined ? Number(body.dailyWorklogMinutes) : course.daily_worklog_minutes;
 
 	if (!name || !Number.isInteger(durationDays) || durationDays <= 0 || durationDays > MAX_DURATION_DAYS) {
 		return Response.json({ error: `Name und Laufzeit (1–${MAX_DURATION_DAYS} Tage) sind erforderlich.` }, { status: 400 });
@@ -169,12 +192,26 @@ adminRouter.patch("/courses/:id", requireAdmin, async (request: IRequest, env: E
 	if (!Number.isInteger(dailyBreakBudgetMinutes) || dailyBreakBudgetMinutes <= 0) {
 		return Response.json({ error: "Tägliches Pausenbudget muss eine positive Zahl sein." }, { status: 400 });
 	}
+	if (hasWorklogTracking && (dailyWorklogMinutes === null || !isValidDailyWorklogMinutes(dailyWorklogMinutes))) {
+		return Response.json(
+			{ error: `Bei aktivierter Worklogerfassung ist eine tägliche Arbeitszeit (1–12 Schulstunden à ${SCHULSTUNDE_MINUTES} Min.) erforderlich.` },
+			{ status: 400 },
+		);
+	}
 
 	const updated = await env.DB.prepare(
-		`UPDATE courses SET name = ?1, duration_days = ?2, daily_break_budget_minutes = ?3, has_break_tracking = ?4, has_worklog_tracking = ?5
-		 WHERE id = ?6 RETURNING ${COURSE_COLUMNS}`,
+		`UPDATE courses SET name = ?1, duration_days = ?2, daily_break_budget_minutes = ?3, has_break_tracking = ?4, has_worklog_tracking = ?5, daily_worklog_minutes = ?6
+		 WHERE id = ?7 RETURNING ${COURSE_COLUMNS}`,
 	)
-		.bind(name, durationDays, dailyBreakBudgetMinutes, hasBreakTracking ? 1 : 0, hasWorklogTracking ? 1 : 0, course.id)
+		.bind(
+			name,
+			durationDays,
+			dailyBreakBudgetMinutes,
+			hasBreakTracking ? 1 : 0,
+			hasWorklogTracking ? 1 : 0,
+			hasWorklogTracking ? dailyWorklogMinutes : null,
+			course.id,
+		)
 		.first<CourseRow>();
 
 	const defaultHeaderLeftImageId = await loadDefaultHeaderLeftImageId(env.DB);
@@ -535,6 +572,141 @@ adminRouter.post("/participants/:id/reset-password", requireAdmin, async (reques
 	}
 
 	return Response.json({ ok: true });
+});
+
+// --- Projekttage & Worklog ---
+
+adminRouter.get("/courses/:id/project-days", requireAdmin, async (request: IRequest, env: Env) => {
+	const course = await loadCourseOr404(env.DB, Number(request.params.id));
+	if (!course) {
+		return Response.json({ error: "Kurs nicht gefunden" }, { status: 404 });
+	}
+	const { results } = await env.DB.prepare("SELECT date FROM project_days WHERE course_id = ?1 ORDER BY date ASC")
+		.bind(course.id)
+		.all<{ date: string }>();
+	return Response.json({ dates: results.map((r) => r.date) });
+});
+
+// Ersetzt die komplette Auswahl (Löschen + Neueinfügen) statt inkrementell
+// hinzuzufügen/zu entfernen – passend zu einer Kalender-Mehrfachauswahl,
+// die als Ganzes gespeichert wird.
+adminRouter.put("/courses/:id/project-days", requireAdmin, async (request: IRequest, env: Env) => {
+	const course = await loadCourseOr404(env.DB, Number(request.params.id));
+	if (!course) {
+		return Response.json({ error: "Kurs nicht gefunden" }, { status: 404 });
+	}
+
+	const body = (await request.json().catch(() => null)) as { dates?: unknown } | null;
+	const dates = Array.isArray(body?.dates)
+		? [...new Set(body!.dates.filter((d): d is string => typeof d === "string" && isValidDateString(d)))]
+		: null;
+	if (!dates) {
+		return Response.json({ error: "dates (Array von YYYY-MM-DD) ist erforderlich." }, { status: 400 });
+	}
+
+	const statements = [env.DB.prepare("DELETE FROM project_days WHERE course_id = ?1").bind(course.id)];
+	for (const date of dates) {
+		statements.push(env.DB.prepare("INSERT INTO project_days (course_id, date) VALUES (?1, ?2)").bind(course.id, date));
+	}
+	await env.DB.batch(statements);
+
+	return Response.json({ dates: dates.sort() });
+});
+
+adminRouter.get("/courses/:id/worklog-report", requireAdmin, async (request: IRequest, env: Env) => {
+	const course = await loadCourseOr404(env.DB, Number(request.params.id));
+	if (!course) {
+		return Response.json({ error: "Kurs nicht gefunden" }, { status: 404 });
+	}
+	if (!course.has_worklog_tracking || !course.daily_worklog_minutes) {
+		return Response.json({ error: "Worklogerfassung ist für diesen Kurs nicht aktiviert." }, { status: 400 });
+	}
+
+	const { results: projectDayRows } = await env.DB.prepare("SELECT date FROM project_days WHERE course_id = ?1 ORDER BY date ASC")
+		.bind(course.id)
+		.all<{ date: string }>();
+	const todayLocal = localDateString(new Date(), course.timezone);
+	const pastProjectDays = projectDayRows.map((r) => r.date).filter((date) => date <= todayLocal);
+
+	const { results: participants } = await env.DB.prepare(
+		`SELECT p.id, p.name, p.group_id, g.name AS group_name
+		 FROM participants p LEFT JOIN groups g ON g.id = p.group_id
+		 WHERE p.course_id = ?1 ORDER BY p.name COLLATE NOCASE ASC`,
+	)
+		.bind(course.id)
+		.all<{ id: number; name: string; group_id: number | null; group_name: string | null }>();
+
+	const { results: entries } = await env.DB.prepare("SELECT participant_id, date, minutes FROM worklog_entries WHERE course_id = ?1")
+		.bind(course.id)
+		.all<{ participant_id: number; date: string; minutes: number }>();
+
+	const minutesByParticipantDate = new Map<string, number>();
+	for (const entry of entries) {
+		const key = `${entry.participant_id}|${entry.date}`;
+		minutesByParticipantDate.set(key, (minutesByParticipantDate.get(key) ?? 0) + entry.minutes);
+	}
+
+	const target = course.daily_worklog_minutes;
+
+	const participantReports = participants.map((p) => {
+		const days = pastProjectDays.map((date) => {
+			const minutes = minutesByParticipantDate.get(`${p.id}|${date}`) ?? 0;
+			return { date, minutes, isComplete: minutes >= target };
+		});
+		const totalMinutes = days.reduce((sum, d) => sum + d.minutes, 0);
+		const completeDays = days.filter((d) => d.isComplete).length;
+		return {
+			id: p.id,
+			name: p.name,
+			groupId: p.group_id,
+			groupName: p.group_name,
+			totalMinutes,
+			completeDays,
+			totalDays: days.length,
+			days,
+		};
+	});
+
+	const groupMap = new Map<
+		string,
+		{ groupId: number | null; groupName: string; totalMinutes: number; memberCount: number; completeDays: number; totalDays: number }
+	>();
+	for (const p of participantReports) {
+		const key = p.groupId === null ? "none" : String(p.groupId);
+		const existing = groupMap.get(key) ?? {
+			groupId: p.groupId,
+			groupName: p.groupName ?? "Ohne Gruppe",
+			totalMinutes: 0,
+			memberCount: 0,
+			completeDays: 0,
+			totalDays: 0,
+		};
+		existing.totalMinutes += p.totalMinutes;
+		existing.memberCount += 1;
+		existing.completeDays += p.completeDays;
+		existing.totalDays += p.totalDays;
+		groupMap.set(key, existing);
+	}
+
+	const totalPossibleDays = participants.length * pastProjectDays.length;
+	const totalCompleteDays = participantReports.reduce((sum, p) => sum + p.completeDays, 0);
+
+	return Response.json({
+		course: {
+			dailyWorklogMinutes: target,
+			projectDaysCount: projectDayRows.length,
+			pastProjectDaysCount: pastProjectDays.length,
+		},
+		summary: {
+			totalExpectedMinutes: totalPossibleDays * target,
+			totalLoggedMinutes: participantReports.reduce((sum, p) => sum + p.totalMinutes, 0),
+			totalCompleteDays,
+			totalPossibleDays,
+			completenessPercent: totalPossibleDays > 0 ? Math.round((totalCompleteDays / totalPossibleDays) * 1000) / 10 : null,
+		},
+		groups: [...groupMap.values()].sort((a, b) => a.groupName.localeCompare(b.groupName, "de")),
+		participants: participantReports,
+	});
 });
 
 // --- Bild-Repository (Header-Logos, gespeichert in R2) ---

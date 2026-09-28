@@ -2,6 +2,26 @@ import { api } from "/api.js";
 import { getBaseUrl } from "/baseUrl.js";
 
 const TOKEN_KEY = "pausenCheckin.adminToken";
+const SCHULSTUNDE_MINUTES = 45;
+
+function courseDateRange(startDate, durationDays) {
+	const [y, m, d] = startDate.split("-").map(Number);
+	const dates = [];
+	for (let i = 0; i < durationDays; i++) {
+		const date = new Date(Date.UTC(y, m - 1, d));
+		date.setUTCDate(date.getUTCDate() + i);
+		dates.push(date.toISOString().slice(0, 10));
+	}
+	return dates;
+}
+
+function formatDurationLabel(minutes) {
+	const schulstunden = minutes / SCHULSTUNDE_MINUTES;
+	const hours = Math.floor(minutes / 60);
+	const remainderMinutes = minutes % 60;
+	const hoursLabel = remainderMinutes > 0 ? `${hours} h ${remainderMinutes} min` : `${hours} h`;
+	return `${schulstunden} Schulstunde${schulstunden === 1 ? "" : "n"} (${hoursLabel})`;
+}
 
 function getToken() {
 	return sessionStorage.getItem(TOKEN_KEY);
@@ -407,10 +427,6 @@ async function renderCourseOverviewTab(container, token, course, { handleAuthErr
 					<label for="dailyBreakBudgetMinutes">Tägliches Pausenbudget (Minuten)</label>
 					<input type="number" id="dailyBreakBudgetMinutes" min="1" step="1" value="${course.dailyBreakBudgetMinutes}" />
 				</div>
-				<div class="toggle-row">
-					<input type="checkbox" id="hasWorklogTracking" ${course.hasWorklogTracking ? "checked" : ""} />
-					<label for="hasWorklogTracking">Worklogerfassung (folgt in einem späteren Schritt)</label>
-				</div>
 
 				<div id="settings-error"></div>
 				<button type="submit">Speichern</button>
@@ -437,6 +453,11 @@ async function renderCourseOverviewTab(container, token, course, { handleAuthErr
 			<h2>Header-Logos</h2>
 			<div id="header-panel">Lädt…</div>
 		</div>
+
+		<div class="card">
+			<h2>Worklogerfassung</h2>
+			<div id="worklog-panel">Lädt…</div>
+		</div>
 	`;
 
 	container.querySelector("#hasBreakTracking").addEventListener("change", (event) => {
@@ -457,7 +478,6 @@ async function renderCourseOverviewTab(container, token, course, { handleAuthErr
 				durationDays: Number(container.querySelector("#durationDays").value),
 				dailyBreakBudgetMinutes: Number(container.querySelector("#dailyBreakBudgetMinutes").value) || course.dailyBreakBudgetMinutes,
 				hasBreakTracking: container.querySelector("#hasBreakTracking").checked,
-				hasWorklogTracking: container.querySelector("#hasWorklogTracking").checked,
 			});
 			await refreshThisCourse();
 		} catch (error) {
@@ -468,6 +488,116 @@ async function renderCourseOverviewTab(container, token, course, { handleAuthErr
 	});
 
 	await renderHeaderPanel(container.querySelector("#header-panel"), token, course, refreshThisCourse);
+	await renderWorklogSettingsPanel(container.querySelector("#worklog-panel"), token, course, { handleAuthError, refreshThisCourse });
+}
+
+async function renderWorklogSettingsPanel(container, token, course, { handleAuthError, refreshThisCourse }) {
+	const dates = courseDateRange(course.startDate, course.durationDays);
+	let selectedDates = new Set();
+	if (course.hasWorklogTracking) {
+		try {
+			const { dates: projectDays } = await api.listProjectDays(token, course.id);
+			selectedDates = new Set(projectDays);
+		} catch (error) {
+			if (handleAuthError(error)) return;
+		}
+	}
+
+	const schulstundenOptions = Array.from({ length: 12 }, (_, i) => i + 1)
+		.map((n) => {
+			const minutes = n * SCHULSTUNDE_MINUTES;
+			const selected = course.dailyWorklogMinutes === minutes ? "selected" : "";
+			return `<option value="${minutes}" ${selected}>${n} Schulstunde${n === 1 ? "" : "n"} (${minutes} Min.)</option>`;
+		})
+		.join("");
+
+	container.innerHTML = `
+		<div class="toggle-row">
+			<input type="checkbox" id="worklog-enabled" ${course.hasWorklogTracking ? "checked" : ""} />
+			<label for="worklog-enabled">Worklogerfassung aktivieren</label>
+		</div>
+		<div id="worklog-config" ${course.hasWorklogTracking ? "" : "hidden"}>
+			<label for="worklog-schulstunden">Tägliche Arbeitszeit</label>
+			<select id="worklog-schulstunden">${schulstundenOptions}</select>
+
+			<label style="margin-top: 16px;">Projekttage (anklicken zum Auswählen/Abwählen)</label>
+			<div id="worklog-calendar" class="link-row"></div>
+			<p class="muted" id="worklog-total" style="margin-top: 10px;"></p>
+		</div>
+		<div id="worklog-error"></div>
+		<button type="button" id="worklog-save" style="margin-top: 16px;">Speichern</button>
+	`;
+
+	const configSection = container.querySelector("#worklog-config");
+	const schulstundenSelect = container.querySelector("#worklog-schulstunden");
+	const calendar = container.querySelector("#worklog-calendar");
+	const totalLabel = container.querySelector("#worklog-total");
+
+	function updateTotal() {
+		const dailyMinutes = Number(schulstundenSelect.value);
+		const totalMinutes = dailyMinutes * selectedDates.size;
+		totalLabel.textContent = `${selectedDates.size} Projekttag(e) × ${dailyMinutes} Min. = ${formatDurationLabel(totalMinutes)} gesamt`;
+	}
+
+	function renderCalendar() {
+		calendar.innerHTML = "";
+		dates.forEach((date) => {
+			const button = document.createElement("button");
+			button.type = "button";
+			button.className = "secondary";
+			const [, m, d] = date.split("-");
+			button.textContent = `${d}.${m}.`;
+			if (selectedDates.has(date)) {
+				button.style.background = "var(--color-primary)";
+				button.style.color = "var(--color-primary-contrast)";
+			}
+			button.addEventListener("click", () => {
+				if (selectedDates.has(date)) {
+					selectedDates.delete(date);
+				} else {
+					selectedDates.add(date);
+				}
+				renderCalendar();
+				updateTotal();
+			});
+			calendar.appendChild(button);
+		});
+	}
+
+	container.querySelector("#worklog-enabled").addEventListener("change", (event) => {
+		configSection.hidden = !event.target.checked;
+		if (event.target.checked && calendar.children.length === 0) {
+			renderCalendar();
+			updateTotal();
+		}
+	});
+
+	if (course.hasWorklogTracking) {
+		renderCalendar();
+		updateTotal();
+	}
+	schulstundenSelect.addEventListener("change", updateTotal);
+
+	container.querySelector("#worklog-save").addEventListener("click", async () => {
+		const errorBox = container.querySelector("#worklog-error");
+		errorBox.textContent = "";
+		const enabled = container.querySelector("#worklog-enabled").checked;
+
+		try {
+			await api.updateCourse(token, course.id, {
+				hasWorklogTracking: enabled,
+				dailyWorklogMinutes: enabled ? Number(schulstundenSelect.value) : undefined,
+			});
+			if (enabled) {
+				await api.setProjectDays(token, course.id, [...selectedDates]);
+			}
+			await refreshThisCourse();
+		} catch (error) {
+			if (handleAuthError(error)) return;
+			errorBox.textContent = error.message;
+			errorBox.className = "error";
+		}
+	});
 }
 
 function imageOptionLabel(image) {
@@ -759,6 +889,10 @@ async function renderCourseReportTab(container, token, course, { handleAuthError
 				</p>
 				<button type="button" id="export-btn">Als Excel (.xlsx) exportieren</button>
 			</div>
+			<div class="card" id="worklog-report-card" ${course.hasWorklogTracking ? "" : "hidden"}>
+				<h2>Worklog-Report</h2>
+				<div id="worklog-report-body"><p class="muted">Lädt…</p></div>
+			</div>
 		`;
 		container.querySelector("#export-btn").addEventListener("click", async (event) => {
 			const button = event.target;
@@ -771,6 +905,81 @@ async function renderCourseReportTab(container, token, course, { handleAuthError
 				button.textContent = "Als Excel (.xlsx) exportieren";
 			}
 		});
+
+		if (course.hasWorklogTracking) {
+			await renderWorklogReport(container.querySelector("#worklog-report-body"), token, course, { handleAuthError });
+		}
+	} catch (error) {
+		if (handleAuthError(error)) return;
+		container.innerHTML = `<p class="error">${error.message}</p>`;
+	}
+}
+
+async function renderWorklogReport(container, token, course, { handleAuthError }) {
+	try {
+		const report = await api.getWorklogReport(token, course.id);
+		const { summary, groups, participants } = report;
+
+		const groupRows = groups
+			.map(
+				(group) => `
+					<tr>
+						<td>${group.label}</td>
+						<td>${group.memberCount}</td>
+						<td>${formatDurationLabel(group.totalMinutes)}</td>
+						<td>${group.totalDays > 0 ? Math.round((group.completeDays / group.totalDays) * 100) : 0}% (${group.completeDays}/${group.totalDays} Tage)</td>
+					</tr>
+				`,
+			)
+			.join("");
+
+		const participantRows = participants
+			.map(
+				(participant) => `
+					<tr>
+						<td>${participant.name}</td>
+						<td>${participant.groupName ?? "Ohne Gruppe"}</td>
+						<td>${formatDurationLabel(participant.totalMinutes)}</td>
+						<td>
+							${participant.totalDays > 0 ? Math.round((participant.completeDays / participant.totalDays) * 100) : 0}%
+							(${participant.completeDays}/${participant.totalDays} Tage)
+						</td>
+						<td>
+							${participant.days
+								.map(
+									(day) =>
+										`<span class="day-chip${day.isComplete ? " is-complete" : " is-incomplete"}" title="${day.date}: ${formatMinutes(day.minutes)}"></span>`,
+								)
+								.join("")}
+						</td>
+					</tr>
+				`,
+			)
+			.join("");
+
+		container.innerHTML = `
+			<p class="muted">
+				${report.course.pastProjectDaysCount} von ${report.course.projectDaysCount} Projekttagen bereits vergangen ·
+				Gesamt erfasst: ${formatDurationLabel(summary.totalLoggedMinutes)} von ${formatDurationLabel(summary.totalExpectedMinutes)} erwartet ·
+				Vollständigkeit: ${summary.completenessPercent}% (${summary.totalCompleteDays}/${summary.totalPossibleDays} Personentage vollständig)
+			</p>
+
+			<h3>Nach Gruppe</h3>
+			<table class="data-table">
+				<thead>
+					<tr><th>Gruppe</th><th>Mitglieder</th><th>Summe</th><th>Vollständigkeit</th></tr>
+				</thead>
+				<tbody>${groupRows || '<tr><td colspan="4" class="muted">Keine Gruppen</td></tr>'}</tbody>
+			</table>
+
+			<h3 style="margin-top: 20px;">Nach Teilnehmer</h3>
+			<table class="data-table">
+				<thead>
+					<tr><th>Name</th><th>Gruppe</th><th>Summe</th><th>Vollständigkeit</th><th>Tage</th></tr>
+				</thead>
+				<tbody>${participantRows || '<tr><td colspan="5" class="muted">Keine Teilnehmer</td></tr>'}</tbody>
+			</table>
+		`;
 	} catch (error) {
 		if (handleAuthError(error)) return;
 		container.innerHTML = `<p class="error">${error.message}</p>`;

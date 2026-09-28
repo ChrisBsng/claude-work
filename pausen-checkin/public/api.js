@@ -69,6 +69,17 @@ export const api = {
 	exportCourseXlsxBlob: (token, courseId) =>
 		requestBlob(`/api/admin/courses/${courseId}/export.xlsx`, { headers: { Authorization: `Bearer ${token}` } }),
 
+	listProjectDays: (token, courseId) =>
+		request(`/api/admin/courses/${courseId}/project-days`, { headers: { Authorization: `Bearer ${token}` } }),
+	setProjectDays: (token, courseId, dates) =>
+		request(`/api/admin/courses/${courseId}/project-days`, {
+			method: "PUT",
+			body: { dates },
+			headers: { Authorization: `Bearer ${token}` },
+		}),
+	getWorklogReport: (token, courseId) =>
+		request(`/api/admin/courses/${courseId}/worklog-report`, { headers: { Authorization: `Bearer ${token}` } }),
+
 	listCourseGroups: (token, courseId) =>
 		request(`/api/admin/courses/${courseId}/groups`, { headers: { Authorization: `Bearer ${token}` } }),
 	createCourseGroup: (token, courseId, name) =>
@@ -141,4 +152,22 @@ export const api = {
 	getDashboard: (dashboardToken) => request(`/api/dashboard/${dashboardToken}`),
 	getDashboardDays: (dashboardToken) => request(`/api/dashboard/${dashboardToken}/days`),
 	getDashboardDayDetail: (dashboardToken, date) => request(`/api/dashboard/${dashboardToken}/days/${date}`),
+
+	getWorklogDays: (checkinCode, accessToken) =>
+		request(`/api/checkin/${checkinCode}/worklog/days`, { headers: { "X-Access-Token": accessToken } }),
+	getWorklogTasks: (checkinCode, accessToken) =>
+		request(`/api/checkin/${checkinCode}/worklog/tasks`, { headers: { "X-Access-Token": accessToken } }),
+	getWorklogDay: (checkinCode, accessToken, date) =>
+		request(`/api/checkin/${checkinCode}/worklog/${date}`, { headers: { "X-Access-Token": accessToken } }),
+	addWorklogEntry: (checkinCode, accessToken, date, task, minutes) =>
+		request(`/api/checkin/${checkinCode}/worklog/${date}`, {
+			method: "POST",
+			body: { task, minutes },
+			headers: { "X-Access-Token": accessToken },
+		}),
+	deleteWorklogEntry: (checkinCode, accessToken, date, entryId) =>
+		request(`/api/checkin/${checkinCode}/worklog/${date}/${entryId}`, {
+			method: "DELETE",
+			headers: { "X-Access-Token": accessToken },
+		}),
 };

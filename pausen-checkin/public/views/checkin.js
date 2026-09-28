@@ -14,6 +14,14 @@ function budgetBarClass(usedMinutes, dailyBudget) {
 	return "";
 }
 
+function formatDurationShort(minutes) {
+	const h = Math.floor(minutes / 60);
+	const m = minutes % 60;
+	if (h === 0) return `${m} min`;
+	if (m === 0) return `${h} h`;
+	return `${h} h ${m} min`;
+}
+
 export async function renderCheckin(root, checkinCode) {
 	root.innerHTML = `<p class="muted">Lädt…</p>`;
 
@@ -169,6 +177,7 @@ async function renderLogin(root, checkinCode, course) {
 function renderStatus(root, checkinCode, course, accessToken, data) {
 	let pollTimer = null;
 	let actionInFlight = false;
+	let currentData = data;
 
 	async function performToggle(explicitStatus) {
 		if (actionInFlight) return;
@@ -188,7 +197,9 @@ function renderStatus(root, checkinCode, course, accessToken, data) {
 		}
 	}
 
-	function paint({ participant, budget }) {
+	function paint(newData) {
+		currentData = newData;
+		const { participant, budget } = newData;
 		const statusLabel = { present: "Anwesend", on_break: "In der Pause", unknown: "Unbekannt" }[participant.status];
 
 		let actionHtml;
@@ -221,6 +232,10 @@ function renderStatus(root, checkinCode, course, accessToken, data) {
 			`;
 		}
 
+		const worklogHtml = course.hasWorklogTracking
+			? `<button type="button" class="secondary" id="open-worklog" style="margin-top: 20px;">Erfasse Worklog</button>`
+			: "";
+
 		root.innerHTML = `
 			${renderBrandHeader(course)}
 			<h1>${course.name}</h1>
@@ -229,12 +244,17 @@ function renderStatus(root, checkinCode, course, accessToken, data) {
 				<h2>${participant.name}</h2>
 				<p><span class="status-badge ${participant.status}">${statusLabel}</span></p>
 				${actionHtml}
+				${worklogHtml}
 			</div>
 		`;
 
 		root.querySelector("#toggle")?.addEventListener("click", () => performToggle());
 		root.querySelector("#choose-present")?.addEventListener("click", () => performToggle("present"));
 		root.querySelector("#choose-break")?.addEventListener("click", () => performToggle("on_break"));
+		root.querySelector("#open-worklog")?.addEventListener("click", () => {
+			clearInterval(pollTimer);
+			renderWorklogPanel(root, checkinCode, course, accessToken, () => renderStatus(root, checkinCode, course, accessToken, currentData));
+		});
 	}
 
 	paint(data);
@@ -252,4 +272,200 @@ function renderStatus(root, checkinCode, course, accessToken, data) {
 			}
 		}
 	}, POLL_INTERVAL_MS);
+}
+
+async function renderWorklogPanel(root, checkinCode, course, accessToken, onBack) {
+	root.innerHTML = `
+		${renderBrandHeader(course)}
+		<h1>${course.name}</h1>
+		<div class="card">
+			<button type="button" class="secondary" id="worklog-back">← Zurück</button>
+			<h2>Worklog erfassen</h2>
+			<div id="worklog-body"><p class="muted">Lädt…</p></div>
+		</div>
+	`;
+	root.querySelector("#worklog-back").addEventListener("click", onBack);
+
+	const body = root.querySelector("#worklog-body");
+
+	let daysData;
+	try {
+		daysData = await api.getWorklogDays(checkinCode, accessToken);
+	} catch (error) {
+		body.innerHTML = `<p class="error">${error.message}</p>`;
+		return;
+	}
+
+	const { dailyWorklogMinutes, today, days } = daysData;
+
+	if (days.length === 0) {
+		body.innerHTML = `<p class="muted">Für diesen Kurs sind noch keine Projekttage hinterlegt.</p>`;
+		return;
+	}
+
+	const sortedDays = [...days].sort((a, b) => (a.date < b.date ? 1 : -1));
+	let tasks = [];
+	try {
+		({ tasks } = await api.getWorklogTasks(checkinCode, accessToken));
+	} catch {
+		// Aufgaben-Vorschläge sind optional.
+	}
+
+	function dayOptionLabel(day) {
+		const [y, m, d] = day.date.split("-");
+		const label = `${d}.${m}.${y}`;
+		const suffix = day.date === today ? " (heute)" : "";
+		const mark = day.isComplete ? "✓" : "✗";
+		return `${mark} ${label}${suffix} – ${formatDurationShort(day.totalMinutes)} / ${formatDurationShort(dailyWorklogMinutes)}`;
+	}
+
+	const initialDate = sortedDays.find((d) => d.date === today)?.date ?? sortedDays[0].date;
+
+	body.innerHTML = `
+		<label for="worklog-day-select">Vergangene Projekttage</label>
+		<select id="worklog-day-select">
+			${sortedDays.map((day) => `<option value="${day.date}" ${day.date === initialDate ? "selected" : ""}>${dayOptionLabel(day)}</option>`).join("")}
+		</select>
+
+		<div id="worklog-day-detail" style="margin-top: 16px;"><p class="muted">Lädt…</p></div>
+	`;
+
+	const daySelect = body.querySelector("#worklog-day-select");
+	daySelect.addEventListener("change", () => loadDay(daySelect.value));
+
+	async function loadDay(date) {
+		const detail = body.querySelector("#worklog-day-detail");
+		detail.innerHTML = `<p class="muted">Lädt…</p>`;
+		let dayData;
+		try {
+			dayData = await api.getWorklogDay(checkinCode, accessToken, date);
+		} catch (error) {
+			detail.innerHTML = `<p class="error">${error.message}</p>`;
+			return;
+		}
+		renderDayDetail(detail, date, dayData);
+	}
+
+	function renderDayDetail(detail, date, dayData) {
+		const { entries, totalMinutes, targetMinutes, isComplete } = dayData;
+
+		const entriesHtml = entries.length
+			? entries
+					.map(
+						(entry) => `
+						<div class="worklog-entry-row" data-entry-id="${entry.id}">
+							<span class="task">${entry.task}</span>
+							<span>${formatDurationShort(entry.minutes)}</span>
+							<button type="button" class="secondary" data-delete="${entry.id}">Löschen</button>
+						</div>
+					`,
+					)
+					.join("")
+			: `<p class="muted">Noch keine Einträge für diesen Tag.</p>`;
+
+		const taskOptions = tasks.length
+			? `<select id="worklog-task-select">
+					<option value="__new__">-- Neuer Task --</option>
+					${tasks.map((t) => `<option value="${t}">${t}</option>`).join("")}
+				</select>
+				<div id="worklog-new-task-wrapper">
+					<input type="text" id="worklog-new-task" placeholder="Task beschreiben" />
+				</div>`
+			: `<input type="text" id="worklog-new-task" placeholder="Task beschreiben" />`;
+
+		detail.innerHTML = `
+			<p class="worklog-total-badge ${isComplete ? "is-complete" : "is-incomplete"}">
+				${formatDurationShort(totalMinutes)} von ${formatDurationShort(targetMinutes)} erfasst
+			</p>
+			${entriesHtml}
+
+			<h3 style="margin-top: 16px;">Neuer Eintrag</h3>
+			<label>Task</label>
+			${taskOptions}
+
+			<div style="display: flex; gap: 10px; margin-top: 10px;">
+				<div>
+					<label for="worklog-hours">Stunden</label>
+					<input type="number" id="worklog-hours" min="0" step="1" value="0" style="width: 80px;" />
+				</div>
+				<div>
+					<label for="worklog-minutes">Minuten</label>
+					<input type="number" id="worklog-minutes" min="0" max="59" step="5" value="0" style="width: 80px;" />
+				</div>
+			</div>
+			<div id="worklog-entry-error"></div>
+			<button type="button" id="worklog-add">Eintrag hinzufügen</button>
+		`;
+
+		const taskSelect = detail.querySelector("#worklog-task-select");
+		const newTaskWrapper = detail.querySelector("#worklog-new-task-wrapper");
+		if (taskSelect) {
+			taskSelect.addEventListener("change", () => {
+				const isNew = taskSelect.value === "__new__";
+				newTaskWrapper.hidden = !isNew;
+				if (isNew) detail.querySelector("#worklog-new-task").focus();
+			});
+		}
+
+		detail.querySelectorAll("[data-delete]").forEach((button) => {
+			button.addEventListener("click", async () => {
+				button.disabled = true;
+				try {
+					await api.deleteWorklogEntry(checkinCode, accessToken, date, button.dataset.delete);
+					await refreshAfterChange(date);
+				} catch (error) {
+					button.disabled = false;
+					window.alert(error.message);
+				}
+			});
+		});
+
+		detail.querySelector("#worklog-add").addEventListener("click", async () => {
+			const errorBox = detail.querySelector("#worklog-entry-error");
+			errorBox.textContent = "";
+
+			const task = (
+				taskSelect && taskSelect.value !== "__new__" ? taskSelect.value : detail.querySelector("#worklog-new-task")?.value
+			)?.trim();
+			const hours = Number(detail.querySelector("#worklog-hours").value) || 0;
+			const minutes = Number(detail.querySelector("#worklog-minutes").value) || 0;
+			const totalMinutes = hours * 60 + minutes;
+
+			if (!task) {
+				errorBox.textContent = "Bitte einen Task angeben.";
+				errorBox.className = "error";
+				return;
+			}
+			if (totalMinutes <= 0) {
+				errorBox.textContent = "Bitte eine Zeit größer als 0 angeben.";
+				errorBox.className = "error";
+				return;
+			}
+
+			try {
+				await api.addWorklogEntry(checkinCode, accessToken, date, task, totalMinutes);
+				if (!tasks.includes(task)) tasks.unshift(task);
+				await refreshAfterChange(date);
+			} catch (error) {
+				errorBox.textContent = error.message;
+				errorBox.className = "error";
+			}
+		});
+	}
+
+	async function refreshAfterChange(date) {
+		try {
+			const updatedDaysData = await api.getWorklogDays(checkinCode, accessToken);
+			const updatedDay = updatedDaysData.days.find((d) => d.date === date);
+			if (updatedDay) {
+				const option = daySelect.querySelector(`option[value="${date}"]`);
+				if (option) option.textContent = dayOptionLabel(updatedDay);
+			}
+		} catch {
+			// Nicht kritisch – Detailansicht wird trotzdem aktualisiert.
+		}
+		await loadDay(date);
+	}
+
+	await loadDay(initialDate);
 }
