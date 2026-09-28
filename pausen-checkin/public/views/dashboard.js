@@ -133,6 +133,7 @@ export async function renderDashboard(root, dashboardToken) {
 		root.innerHTML = `<h1>Nicht gefunden</h1><p class="error">${error.message}</p>`;
 		return;
 	}
+	document.title = course.name;
 
 	const checkinUrl = `${await getBaseUrl()}/k/${course.checkinCode}`;
 	root.innerHTML = `

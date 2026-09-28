@@ -32,6 +32,7 @@ export async function renderCheckin(root, checkinCode) {
 		root.innerHTML = `<h1>Nicht gefunden</h1><p class="error">${error.message}</p>`;
 		return;
 	}
+	document.title = course.name;
 
 	const storedToken = localStorage.getItem(tokenKey(checkinCode));
 	if (storedToken) {
@@ -80,11 +81,11 @@ async function renderLogin(root, checkinCode, course) {
 							<option value="__new__">Ich bin neu / nicht in der Liste</option>
 						</select>
 						<div id="new-name-wrapper" hidden>
-							<label for="new-name">Dein Name</label>
-							<input type="text" id="new-name" />
+							<label for="new-name">Dein Name (Vorname Nachname)</label>
+							<input type="text" id="new-name" placeholder="Vorname Nachname" />
 						</div>`
-						: `<label for="new-name">Dein Name</label>
-						<input type="text" id="new-name" autofocus required />`
+						: `<label for="new-name">Dein Name (Vorname Nachname)</label>
+						<input type="text" id="new-name" placeholder="Vorname Nachname" autofocus required />`
 				}
 
 				<div id="group-field-wrapper" ${hasNames ? "hidden" : ""}>

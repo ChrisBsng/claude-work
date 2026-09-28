@@ -230,10 +230,7 @@ async function renderCoursesOverview(container, token, { refreshCourses, handleA
 					<input type="checkbox" id="hasBreakTracking" checked />
 					<label for="hasBreakTracking">Pausenzeiterfassung</label>
 				</div>
-				<div class="toggle-row">
-					<input type="checkbox" id="hasWorklogTracking" />
-					<label for="hasWorklogTracking">Worklogerfassung (folgt in einem späteren Schritt)</label>
-				</div>
+				<p class="muted">Die Worklogerfassung kann nach dem Anlegen in den Kurs-Einstellungen aktiviert werden.</p>
 
 				<div id="course-form-error"></div>
 				<button type="submit">Kurs anlegen</button>
@@ -262,10 +259,9 @@ async function renderCoursesOverview(container, token, { refreshCourses, handleA
 		const durationDays = Number(container.querySelector("#durationDays").value);
 		const dailyBreakBudgetMinutes = Number(container.querySelector("#dailyBreakBudgetMinutes").value);
 		const hasBreakTracking = container.querySelector("#hasBreakTracking").checked;
-		const hasWorklogTracking = container.querySelector("#hasWorklogTracking").checked;
 
 		try {
-			await api.adminCreateCourse(token, { name, durationDays, dailyBreakBudgetMinutes, hasBreakTracking, hasWorklogTracking });
+			await api.adminCreateCourse(token, { name, durationDays, dailyBreakBudgetMinutes, hasBreakTracking });
 			event.target.reset();
 			await refreshCourses();
 			await loadCourseTable();
