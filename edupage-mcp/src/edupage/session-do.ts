@@ -39,6 +39,79 @@ interface RawRequestInit {
 	headers?: Record<string, string>;
 }
 
+// Grobe, unvollständige Typen für die rohe curentttGetData-Antwort - Edupage
+// dokumentiert das Format nicht, jedes Feld hier ist aus echten Responses
+// abgeleitet. Nur das, was simplifyTimetableItem tatsächlich liest.
+interface RawTimetableHeaderEntry {
+	text?: string;
+	item?: { text?: string };
+}
+interface RawTimetableItem {
+	name?: string;
+	date?: string;
+	starttime?: string;
+	endtime?: string;
+	subjectid?: string;
+	classids?: string[];
+	teacherids?: string[];
+	classroomids?: string[];
+	uniperiod?: string;
+	dpRow?: {
+		type?: string;
+		header?: RawTimetableHeaderEntry[];
+		flags?: { dp0?: { period?: string; allday?: boolean; cancelled?: boolean } };
+	};
+}
+
+export interface TimetableItem {
+	date: string;
+	type: "lesson" | "event";
+	title: string;
+	start: string;
+	end: string;
+	period?: string;
+	subjectId?: string;
+	classIds?: string[];
+	teacherIds?: string[];
+	roomIds?: string[];
+	allDay?: boolean;
+	cancelled?: boolean;
+}
+
+/** Erste lesbare Kopfzeile aus dpRow.header, z. B. "BEE32A · EEA" für eine Stunde. */
+function headerText(header?: RawTimetableHeaderEntry[]): string | undefined {
+	for (const entry of header ?? []) {
+		const text = entry.text ?? entry.item?.text;
+		if (text) return text;
+	}
+	return undefined;
+}
+
+/**
+ * Reduziert einen rohen curentttGetData-Eintrag auf die für Menschen (bzw.
+ * ein LLM) relevanten Felder. Die Rohantwort trägt pro Eintrag komplette
+ * UI-Menüs, Schülerlisten, Feld-Definitionen usw. mit - unnötig groß für
+ * den normalen "was steht heute an"-Anwendungsfall.
+ */
+function simplifyTimetableItem(raw: RawTimetableItem): TimetableItem {
+	const isLesson = raw.dpRow?.type === "lesson";
+	const flags = raw.dpRow?.flags?.dp0;
+	return {
+		date: raw.date ?? "",
+		type: isLesson ? "lesson" : "event",
+		title: (isLesson ? headerText(raw.dpRow?.header) : raw.name) ?? headerText(raw.dpRow?.header) ?? raw.name ?? "",
+		start: raw.starttime ?? "",
+		end: raw.endtime ?? "",
+		period: flags?.period || raw.uniperiod || undefined,
+		subjectId: raw.subjectid || undefined,
+		classIds: raw.classids?.length ? raw.classids : undefined,
+		teacherIds: raw.teacherids?.length ? raw.teacherids : undefined,
+		roomIds: raw.classroomids?.length ? raw.classroomids : undefined,
+		allDay: flags?.allday,
+		cancelled: flags?.cancelled,
+	};
+}
+
 const SUBDOMAIN_PATTERN = /^[a-z0-9-]{1,63}$/i;
 
 /**
@@ -177,7 +250,11 @@ export class EdupageSessionDO extends DurableObject<Env> {
 	 * abgeleitet). Für unbekannte Rollenpräfixe werden table/id weggelassen
 	 * (liefert dann nur die schulweiten Termine).
 	 */
-	async getTimetable(credentials: EdupageCredentials, datefrom: string, dateto: string): Promise<unknown> {
+	async getTimetable(
+		credentials: EdupageCredentials,
+		datefrom: string,
+		dateto: string,
+	): Promise<{ items: TimetableItem[] }> {
 		const session = await this.ensureSession(credentials);
 		const args: Record<string, unknown> = {
 			year: Number(datefrom.slice(0, 4)),
@@ -196,7 +273,10 @@ export class EdupageSessionDO extends DurableObject<Env> {
 			args.id = roleMatch[2];
 		}
 
-		return this.ascCall(credentials, "/timetable/server/currenttt.js", "curentttGetData", [args]);
+		const data = (await this.ascCall(credentials, "/timetable/server/currenttt.js", "curentttGetData", [args])) as {
+			r?: { ttitems?: RawTimetableItem[] };
+		};
+		return { items: (data.r?.ttitems ?? []).map(simplifyTimetableItem) };
 	}
 
 	/** Escape-Hatch für Edupage-Endpunkte außerhalb des __func/__args-Musters. */
