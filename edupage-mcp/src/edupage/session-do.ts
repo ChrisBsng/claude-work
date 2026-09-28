@@ -93,22 +93,9 @@ export class EdupageSessionDO extends DurableObject<Env> {
 		if (!match) {
 			// TEMPORÄR: Diagnose-Ausgabe zum Herausfinden des tatsächlichen
 			// Edupage-Seitenformats. Wird entfernt, sobald das Pattern feststeht.
-			throw new Error(
-				"DEBUG login=" +
-					loginResponse.status +
-					" loc=" +
-					(loginResponse.headers.get("location") ?? "none") +
-					" dash=" +
-					dashboardResponse.status +
-					" dashLoc=" +
-					(dashboardResponse.headers.get("location") ?? "none") +
-					" hasGsechash=" +
-					html.includes("gsechash") +
-					" htmlLen=" +
-					html.length +
-					" snippet=" +
-					html.slice(0, 1200).replace(/\s+/g, " "),
-			);
+			const idx = html.indexOf("gsechash");
+			const around = idx >= 0 ? html.slice(Math.max(0, idx - 300), idx + 300).replace(/\s+/g, " ") : "n/a";
+			throw new Error("DEBUG gsechashAt=" + idx + " around=" + around);
 		}
 
 		let data: Record<string, unknown>;
