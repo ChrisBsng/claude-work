@@ -10,6 +10,7 @@ import {
 	localDateString,
 } from "../breakBudget";
 import { buildXlsx, type XlsxCell, type XlsxSheet } from "../xlsx";
+import { isAllowedImageType, MAX_IMAGE_UPLOAD_BYTES } from "../images";
 
 const CHECKIN_CODE_BYTES = 6;
 const DASHBOARD_TOKEN_BYTES = 20;
@@ -26,12 +27,21 @@ interface CourseRow {
 	dashboard_token: string;
 	is_active: number;
 	created_at: string;
+	header_left_image_id: string | null;
+	header_right_image_id: string | null;
 }
 
 const COURSE_COLUMNS =
-	"id, name, start_date, duration_days, daily_break_budget_minutes, timezone, checkin_code, dashboard_token, is_active, created_at";
+	"id, name, start_date, duration_days, daily_break_budget_minutes, timezone, checkin_code, dashboard_token, is_active, created_at, header_left_image_id, header_right_image_id";
 
-function serializeCourse(course: CourseRow) {
+async function loadDefaultHeaderLeftImageId(db: D1Database): Promise<string | null> {
+	const setting = await db
+		.prepare("SELECT value FROM app_settings WHERE key = 'default_header_left_image_id'")
+		.first<{ value: string }>();
+	return setting?.value ?? null;
+}
+
+function serializeCourse(course: CourseRow, defaultHeaderLeftImageId: string | null) {
 	return {
 		id: course.id,
 		name: course.name,
@@ -42,6 +52,9 @@ function serializeCourse(course: CourseRow) {
 		dashboardToken: course.dashboard_token,
 		isActive: Boolean(course.is_active),
 		createdAt: course.created_at,
+		headerLeftImageId: course.header_left_image_id ?? defaultHeaderLeftImageId,
+		headerLeftImageOverrideId: course.header_left_image_id,
+		headerRightImageId: course.header_right_image_id,
 	};
 }
 
@@ -66,7 +79,8 @@ adminRouter.post("/login", async (request: IRequest, env: Env) => {
 
 adminRouter.get("/courses", requireAdmin, async (_request: IRequest, env: Env) => {
 	const { results } = await env.DB.prepare(`SELECT ${COURSE_COLUMNS} FROM courses ORDER BY created_at DESC`).all<CourseRow>();
-	return Response.json({ courses: results.map(serializeCourse) });
+	const defaultHeaderLeftImageId = await loadDefaultHeaderLeftImageId(env.DB);
+	return Response.json({ courses: results.map((c) => serializeCourse(c, defaultHeaderLeftImageId)) });
 });
 
 adminRouter.post("/courses", requireAdmin, async (request: IRequest, env: Env) => {
@@ -105,7 +119,45 @@ adminRouter.post("/courses", requireAdmin, async (request: IRequest, env: Env) =
 		.bind(name, durationDays, dailyBreakBudgetMinutes, checkinCode, dashboardToken)
 		.first<CourseRow>();
 
-	return Response.json({ course: serializeCourse(course!) }, { status: 201 });
+	const defaultHeaderLeftImageId = await loadDefaultHeaderLeftImageId(env.DB);
+	return Response.json({ course: serializeCourse(course!, defaultHeaderLeftImageId) }, { status: 201 });
+});
+
+// Header-Logos eines einzelnen Kurses setzen/zurücksetzen. null bei left
+// bedeutet "globalen Standard verwenden", null bei right "kein Bild".
+adminRouter.patch("/courses/:id/header", requireAdmin, async (request: IRequest, env: Env) => {
+	const course = await loadCourseOr404(env.DB, Number(request.params.id));
+	if (!course) {
+		return Response.json({ error: "Kurs nicht gefunden" }, { status: 404 });
+	}
+
+	const body = (await request.json().catch(() => null)) as
+		| { headerLeftImageId?: string | null; headerRightImageId?: string | null }
+		| null;
+	if (!body) {
+		return Response.json({ error: "Ungültige Anfrage" }, { status: 400 });
+	}
+
+	for (const imageId of [body.headerLeftImageId, body.headerRightImageId]) {
+		if (imageId) {
+			const exists = await env.DB.prepare("SELECT 1 FROM images WHERE id = ?1").bind(imageId).first();
+			if (!exists) {
+				return Response.json({ error: `Bild ${imageId} nicht gefunden` }, { status: 404 });
+			}
+		}
+	}
+
+	// Feld weggelassen -> unverändert lassen; Feld als null/"" gesendet ->
+	// explizit zurücksetzen (links: globaler Standard, rechts: kein Bild).
+	const newLeft = "headerLeftImageId" in body ? (body.headerLeftImageId || null) : course.header_left_image_id;
+	const newRight = "headerRightImageId" in body ? (body.headerRightImageId || null) : course.header_right_image_id;
+
+	const updated = await env.DB.prepare(`UPDATE courses SET header_left_image_id = ?1, header_right_image_id = ?2 WHERE id = ?3 RETURNING ${COURSE_COLUMNS}`)
+		.bind(newLeft, newRight, course.id)
+		.first<CourseRow>();
+
+	const defaultHeaderLeftImageId = await loadDefaultHeaderLeftImageId(env.DB);
+	return Response.json({ course: serializeCourse(updated!, defaultHeaderLeftImageId) });
 });
 
 // Endgültiges Löschen: explizite Kaskade statt Verlass auf D1s
@@ -235,4 +287,97 @@ adminRouter.get("/courses/:id/export.xlsx", requireAdmin, async (request: IReque
 			"Content-Disposition": `attachment; filename="${safeFileName}.xlsx"`,
 		},
 	});
+});
+
+// --- Bild-Repository (Header-Logos, gespeichert in R2) ---
+
+interface ImageRow {
+	id: string;
+	original_filename: string;
+	content_type: string;
+	size_bytes: number;
+	uploaded_at: string;
+}
+
+function serializeImage(image: ImageRow) {
+	return {
+		id: image.id,
+		filename: image.original_filename,
+		contentType: image.content_type,
+		sizeBytes: image.size_bytes,
+		uploadedAt: image.uploaded_at,
+		url: `/api/images/${image.id}`,
+	};
+}
+
+adminRouter.get("/images", requireAdmin, async (_request: IRequest, env: Env) => {
+	const { results } = await env.DB.prepare("SELECT * FROM images ORDER BY uploaded_at DESC").all<ImageRow>();
+	const defaultHeaderLeftImageId = await loadDefaultHeaderLeftImageId(env.DB);
+	return Response.json({ images: results.map(serializeImage), defaultHeaderLeftImageId });
+});
+
+adminRouter.post("/images", requireAdmin, async (request: IRequest, env: Env) => {
+	const contentType = request.headers.get("Content-Type") ?? "";
+	if (!isAllowedImageType(contentType)) {
+		return Response.json({ error: "Nicht unterstützter Bildtyp. Erlaubt: PNG, JPEG, WebP, GIF, SVG." }, { status: 400 });
+	}
+
+	const body = await request.arrayBuffer();
+	if (body.byteLength === 0) {
+		return Response.json({ error: "Leere Datei" }, { status: 400 });
+	}
+	if (body.byteLength > MAX_IMAGE_UPLOAD_BYTES) {
+		return Response.json(
+			{ error: `Datei zu groß (max. ${Math.round(MAX_IMAGE_UPLOAD_BYTES / 1024 / 1024)} MB).` },
+			{ status: 400 },
+		);
+	}
+
+	const filenameHeader = request.headers.get("X-Filename");
+	const filename = filenameHeader ? decodeURIComponent(filenameHeader) : "bild";
+
+	const id = randomToken(16);
+	await env.IMAGES.put(id, body, { httpMetadata: { contentType } });
+
+	const image = await env.DB.prepare(
+		"INSERT INTO images (id, original_filename, content_type, size_bytes) VALUES (?1, ?2, ?3, ?4) RETURNING *",
+	)
+		.bind(id, filename, contentType, body.byteLength)
+		.first<ImageRow>();
+
+	return Response.json({ image: serializeImage(image!) }, { status: 201 });
+});
+
+adminRouter.delete("/images/:id", requireAdmin, async (request: IRequest, env: Env) => {
+	const id = request.params.id;
+	await env.IMAGES.delete(id);
+	await env.DB.batch([
+		env.DB.prepare("UPDATE courses SET header_left_image_id = NULL WHERE header_left_image_id = ?1").bind(id),
+		env.DB.prepare("UPDATE courses SET header_right_image_id = NULL WHERE header_right_image_id = ?1").bind(id),
+		env.DB.prepare("DELETE FROM app_settings WHERE key = 'default_header_left_image_id' AND value = ?1").bind(id),
+		env.DB.prepare("DELETE FROM images WHERE id = ?1").bind(id),
+	]);
+	return Response.json({ deletedId: id });
+});
+
+adminRouter.put("/settings/default-header-left", requireAdmin, async (request: IRequest, env: Env) => {
+	const body = (await request.json().catch(() => null)) as { imageId?: string | null } | null;
+	const imageId = body?.imageId || null;
+
+	if (imageId) {
+		const exists = await env.DB.prepare("SELECT 1 FROM images WHERE id = ?1").bind(imageId).first();
+		if (!exists) {
+			return Response.json({ error: "Bild nicht gefunden" }, { status: 404 });
+		}
+		await env.DB.prepare(
+			`INSERT INTO app_settings (key, value) VALUES ('default_header_left_image_id', ?1)
+			 ON CONFLICT (key) DO UPDATE SET value = excluded.value`,
+		)
+			.bind(imageId)
+			.run();
+	} else {
+		await env.DB.prepare("DELETE FROM app_settings WHERE key = 'default_header_left_image_id'").run();
+	}
+
+	return Response.json({ defaultHeaderLeftImageId: imageId });
 });

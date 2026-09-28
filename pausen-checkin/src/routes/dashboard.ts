@@ -7,6 +7,7 @@ import {
 	fetchCourseEventDates,
 	fetchRecentCourseEventsByParticipant,
 } from "../breakBudget";
+import { resolveHeaderImageIds } from "../images";
 
 interface CourseRow {
 	id: number;
@@ -17,25 +18,28 @@ interface CourseRow {
 	timezone: string;
 	checkin_code: string;
 	is_active: number;
+	header_left_image_id: string | null;
+	header_right_image_id: string | null;
 }
 
 interface ParticipantRow {
 	id: number;
 	name: string;
-	status: "present" | "on_break";
 }
 
 async function getCourseByDashboardToken(db: D1Database, dashboardToken: string): Promise<CourseRow | null> {
 	return db
 		.prepare(
-			`SELECT id, name, start_date, duration_days, daily_break_budget_minutes, timezone, checkin_code, is_active
+			`SELECT id, name, start_date, duration_days, daily_break_budget_minutes, timezone, checkin_code, is_active,
+			 header_left_image_id, header_right_image_id
 			 FROM courses WHERE dashboard_token = ?1`,
 		)
 		.bind(dashboardToken)
 		.first<CourseRow>();
 }
 
-function serializeCourse(course: CourseRow) {
+async function serializeCourse(db: D1Database, course: CourseRow) {
+	const { leftImageId, rightImageId } = await resolveHeaderImageIds(db, course);
 	return {
 		name: course.name,
 		startDate: course.start_date,
@@ -43,6 +47,8 @@ function serializeCourse(course: CourseRow) {
 		dailyBreakBudgetMinutes: course.daily_break_budget_minutes,
 		checkinCode: course.checkin_code,
 		isActive: Boolean(course.is_active),
+		headerLeftImageId: leftImageId,
+		headerRightImageId: rightImageId,
 	};
 }
 
@@ -55,7 +61,7 @@ dashboardRouter.get("/:dashboardToken", async (request: IRequest, env: Env) => {
 	}
 
 	const { results: participants } = await env.DB.prepare(
-		"SELECT id, name, status FROM participants WHERE course_id = ?1 ORDER BY name COLLATE NOCASE ASC",
+		"SELECT id, name FROM participants WHERE course_id = ?1 ORDER BY name COLLATE NOCASE ASC",
 	)
 		.bind(course.id)
 		.all<ParticipantRow>();
@@ -68,10 +74,11 @@ dashboardRouter.get("/:dashboardToken", async (request: IRequest, env: Env) => {
 			course.daily_break_budget_minutes,
 			course.timezone,
 		);
-		return { id: participant.id, name: participant.name, status: budget.isOnBreakNow ? "on_break" : "present", ...budget };
+		const status = !budget.hasActivityToday ? "unknown" : budget.isOnBreakNow ? "on_break" : "present";
+		return { id: participant.id, name: participant.name, status, ...budget };
 	});
 
-	return Response.json({ course: serializeCourse(course), participants: participantsWithBudget });
+	return Response.json({ course: await serializeCourse(env.DB, course), participants: participantsWithBudget });
 });
 
 // Welche Kalendertage haben überhaupt aufgezeichnete Check-in/-out-Events?
@@ -117,7 +124,7 @@ dashboardRouter.get("/:dashboardToken/days/:date", async (request: IRequest, env
 
 	return Response.json({
 		date,
-		course: serializeCourse(course),
+		course: await serializeCourse(env.DB, course),
 		participants: participantsWithUsage,
 	});
 });

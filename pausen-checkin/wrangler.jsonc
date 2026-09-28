@@ -18,5 +18,11 @@
 			"database_name": "pausen-checkin-db",
 			"database_id": "f18451a0-0b28-438f-9f34-089cf94d6ba0"
 		}
+	],
+	"r2_buckets": [
+		{
+			"binding": "IMAGES",
+			"bucket_name": "pausen-checkin-images"
+		}
 	]
 }

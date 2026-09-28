@@ -108,6 +108,64 @@ async function renderReportPanel(container, token, course) {
 	}
 }
 
+function imageOptionLabel(image) {
+	return `${image.filename} (${new Date(image.uploadedAt).toLocaleDateString("de-DE")})`;
+}
+
+async function renderHeaderPanel(container, token, course) {
+	container.innerHTML = `<p class="muted">Lädt Bild-Repository…</p>`;
+	let images = [];
+	try {
+		({ images } = await api.listImages(token));
+	} catch (error) {
+		container.innerHTML = `<p class="error">${error.message}</p>`;
+		return;
+	}
+
+	const leftOptions = [
+		`<option value="">Standard verwenden</option>`,
+		...images.map(
+			(img) => `<option value="${img.id}" ${course.headerLeftImageOverrideId === img.id ? "selected" : ""}>${imageOptionLabel(img)}</option>`,
+		),
+	].join("");
+	const rightOptions = [
+		`<option value="">Kein Bild</option>`,
+		...images.map(
+			(img) => `<option value="${img.id}" ${course.headerRightImageId === img.id ? "selected" : ""}>${imageOptionLabel(img)}</option>`,
+		),
+	].join("");
+
+	container.innerHTML = `
+		<label for="header-left-select">Logo links</label>
+		<select id="header-left-select">${leftOptions}</select>
+		<label for="header-right-select">Logo rechts</label>
+		<select id="header-right-select">${rightOptions}</select>
+		<div id="header-save-error"></div>
+		<button type="button" id="header-save">Speichern</button>
+		<p class="muted" style="margin-top: 10px;">Neue Bilder hochladen: siehe „Bild-Repository“ oben.</p>
+	`;
+
+	container.querySelector("#header-save").addEventListener("click", async (event) => {
+		const button = event.target;
+		const errorBox = container.querySelector("#header-save-error");
+		errorBox.textContent = "";
+		button.disabled = true;
+		try {
+			const headerLeftImageId = container.querySelector("#header-left-select").value || null;
+			const headerRightImageId = container.querySelector("#header-right-select").value || null;
+			const { course: updated } = await api.updateCourseHeader(token, course.id, { headerLeftImageId, headerRightImageId });
+			Object.assign(course, updated);
+			button.textContent = "Gespeichert!";
+			setTimeout(() => (button.textContent = "Speichern"), 1500);
+		} catch (error) {
+			errorBox.textContent = error.message;
+			errorBox.className = "error";
+		} finally {
+			button.disabled = false;
+		}
+	});
+}
+
 function courseRow(course, token, onSelectionChange) {
 	const dashboardUrl = courseUrl(`/d/${course.dashboardToken}`);
 	const checkinUrl = courseUrl(`/k/${course.checkinCode}`);
@@ -129,7 +187,9 @@ function courseRow(course, token, onSelectionChange) {
 				<a href="${checkinUrl}" target="_blank" rel="noopener">Öffnen</a>
 			</div>
 			<button type="button" class="secondary" data-toggle-report>Report / Statistik</button>
+			<button type="button" class="secondary" data-toggle-header>Header-Logos</button>
 			<div class="card" data-report hidden style="margin-top: 10px;"></div>
+			<div class="card" data-header hidden style="margin-top: 10px;"></div>
 		</td>
 	`;
 
@@ -149,7 +209,90 @@ function courseRow(course, token, onSelectionChange) {
 		}
 	});
 
+	const headerPanel = tr.querySelector("[data-header]");
+	tr.querySelector("[data-toggle-header]").addEventListener("click", async () => {
+		const isHidden = headerPanel.hasAttribute("hidden");
+		if (isHidden) {
+			headerPanel.removeAttribute("hidden");
+			await renderHeaderPanel(headerPanel, token, course);
+		} else {
+			headerPanel.setAttribute("hidden", "");
+		}
+	});
+
 	return tr;
+}
+
+async function renderImageRepository(container, token) {
+	container.innerHTML = `
+		<h2>Bild-Repository</h2>
+		<div class="card">
+			<p class="muted">
+				Zentrale Sammlung für Header-Logos. Das als Standard markierte Bild wird automatisch als
+				linkes Logo verwendet, solange ein Kurs kein eigenes festgelegt hat.
+			</p>
+			<label for="image-upload">Neues Bild hochladen (PNG, JPEG, WebP, GIF, SVG – max. 5 MB)</label>
+			<input type="file" id="image-upload" accept="image/png,image/jpeg,image/webp,image/gif,image/svg+xml" />
+			<div id="image-upload-error"></div>
+			<div id="image-grid" class="image-grid"></div>
+		</div>
+	`;
+
+	const uploadError = container.querySelector("#image-upload-error");
+
+	async function loadImages() {
+		const grid = container.querySelector("#image-grid");
+		grid.innerHTML = `<p class="muted">Lädt…</p>`;
+		try {
+			const { images, defaultHeaderLeftImageId } = await api.listImages(token);
+			if (images.length === 0) {
+				grid.innerHTML = '<p class="muted">Noch keine Bilder hochgeladen.</p>';
+				return;
+			}
+			grid.innerHTML = "";
+			images.forEach((image) => {
+				const isDefault = image.id === defaultHeaderLeftImageId;
+				const tile = document.createElement("div");
+				tile.className = `image-tile${isDefault ? " is-default" : ""}`;
+				tile.innerHTML = `
+					<img src="${image.url}" alt="${image.filename}" />
+					<div class="filename">${image.filename}${isDefault ? " ⭐ Standard" : ""}</div>
+					<div class="actions">
+						${isDefault ? "" : `<button type="button" class="secondary" data-set-default>Als Standard (links)</button>`}
+						<button type="button" class="secondary" data-delete style="color: var(--color-danger); border-color: var(--color-danger);">Löschen</button>
+					</div>
+				`;
+				tile.querySelector("[data-set-default]")?.addEventListener("click", async () => {
+					await api.setDefaultHeaderLeftImage(token, image.id);
+					await loadImages();
+				});
+				tile.querySelector("[data-delete]").addEventListener("click", async () => {
+					if (!window.confirm(`Bild "${image.filename}" wirklich löschen? Kurse, die es als Logo nutzen, verlieren es.`)) return;
+					await api.deleteImage(token, image.id);
+					await loadImages();
+				});
+				grid.appendChild(tile);
+			});
+		} catch (error) {
+			grid.innerHTML = `<p class="error">${error.message}</p>`;
+		}
+	}
+
+	container.querySelector("#image-upload").addEventListener("change", async (event) => {
+		const file = event.target.files[0];
+		if (!file) return;
+		uploadError.textContent = "";
+		try {
+			await api.uploadImage(token, file);
+			event.target.value = "";
+			await loadImages();
+		} catch (error) {
+			uploadError.textContent = error.message;
+			uploadError.className = "error";
+		}
+	});
+
+	await loadImages();
 }
 
 async function renderCourses(root, token) {
@@ -158,6 +301,8 @@ async function renderCourses(root, token) {
 			<h1>Admin-Bereich</h1>
 			<button type="button" id="logout" class="secondary">Abmelden</button>
 		</nav>
+
+		<div id="image-repository"></div>
 
 		<div class="card">
 			<h2>Neuen Kurs anlegen</h2>
@@ -289,5 +434,6 @@ async function renderCourses(root, token) {
 		}
 	}
 
+	await renderImageRepository(root.querySelector("#image-repository"), token);
 	await loadCourses();
 }

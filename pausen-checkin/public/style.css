@@ -134,6 +134,83 @@ button:disabled {
 	background: var(--color-break);
 }
 
+.status-badge.unknown {
+	background: var(--color-muted);
+}
+
+.choice-row {
+	display: flex;
+	gap: 12px;
+	margin-top: 16px;
+}
+
+.choice-row button {
+	flex: 1;
+	margin-top: 0;
+	padding: 20px 12px;
+}
+
+.brand-header {
+	display: flex;
+	justify-content: space-between;
+	align-items: center;
+	margin-bottom: 16px;
+}
+
+.brand-logo {
+	max-height: 56px;
+	max-width: 220px;
+	object-fit: contain;
+}
+
+.image-grid {
+	display: grid;
+	grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+	gap: 12px;
+	margin-top: 12px;
+}
+
+.image-tile {
+	border: 1px solid var(--color-border);
+	border-radius: var(--radius);
+	padding: 10px;
+	text-align: center;
+	background: var(--color-bg);
+}
+
+.image-tile img {
+	max-width: 100%;
+	max-height: 80px;
+	object-fit: contain;
+	background: #fff;
+	border-radius: 6px;
+	padding: 6px;
+}
+
+.image-tile .filename {
+	font-size: 0.8rem;
+	margin-top: 6px;
+	word-break: break-all;
+}
+
+.image-tile .actions {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+	margin-top: 8px;
+}
+
+.image-tile button {
+	margin-top: 0;
+	padding: 6px 8px;
+	font-size: 0.8rem;
+}
+
+.image-tile.is-default {
+	border-color: var(--color-primary);
+	border-width: 2px;
+}
+
 table {
 	width: 100%;
 	border-collapse: collapse;

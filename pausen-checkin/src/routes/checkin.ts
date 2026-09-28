@@ -1,10 +1,12 @@
 import { Router, type IRequest } from "itty-router";
 import type { Env } from "../env";
 import { computeBreakBudgetFromEvents, fetchRecentParticipantEvents, type BreakBudgetResult } from "../breakBudget";
-import { randomToken } from "../crypto";
+import { hashParticipantPassword, randomToken, verifyParticipantPassword } from "../crypto";
+import { resolveHeaderImageIds } from "../images";
 import { renderQrCodeSvg } from "../qrcode";
 
 const PARTICIPANT_TOKEN_BYTES = 20;
+const MIN_PASSWORD_LENGTH = 4;
 
 interface CourseRow {
 	id: number;
@@ -12,17 +14,25 @@ interface CourseRow {
 	daily_break_budget_minutes: number;
 	timezone: string;
 	is_active: number;
+	header_left_image_id: string | null;
+	header_right_image_id: string | null;
 }
+
+type ParticipantStatus = "present" | "on_break" | "unknown";
 
 interface ParticipantRow {
 	id: number;
 	name: string;
-	status: "present" | "on_break";
+	access_token: string;
+	password_hash: string | null;
 }
 
 async function getActiveCourseByCheckinCode(db: D1Database, checkinCode: string): Promise<CourseRow | null> {
 	const course = await db
-		.prepare("SELECT id, name, daily_break_budget_minutes, timezone, is_active FROM courses WHERE checkin_code = ?1")
+		.prepare(
+			`SELECT id, name, daily_break_budget_minutes, timezone, is_active, header_left_image_id, header_right_image_id
+			 FROM courses WHERE checkin_code = ?1`,
+		)
 		.bind(checkinCode)
 		.first<CourseRow>();
 	return course && course.is_active ? course : null;
@@ -30,24 +40,24 @@ async function getActiveCourseByCheckinCode(db: D1Database, checkinCode: string)
 
 async function getParticipantByToken(db: D1Database, courseId: number, accessToken: string): Promise<ParticipantRow | null> {
 	return db
-		.prepare("SELECT id, name, status FROM participants WHERE course_id = ?1 AND access_token = ?2")
+		.prepare("SELECT id, name, access_token, password_hash FROM participants WHERE course_id = ?1 AND access_token = ?2")
 		.bind(courseId, accessToken)
 		.first<ParticipantRow>();
 }
 
-// Der tatsächlich angezeigte Status kommt immer frisch aus dem Event-Log
-// (tagesbezogen), nicht aus der ggf. seit gestern veralteten Spalte
-// participants.status – so ist eine vergessene Pause am nächsten Tag
-// automatisch wieder "anwesend" statt hängenzubleiben.
+// Status wird immer frisch aus dem Event-Log abgeleitet (tagesbezogen),
+// nicht aus einer gespeicherten Spalte: "unknown" heißt "heute noch keine
+// einzige Aktion", damit hängt nichts von Vortagen ab und ein neuer Tag
+// startet nie fälschlich als "anwesend".
 async function loadParticipantView(
 	db: D1Database,
-	participant: ParticipantRow,
+	participant: { id: number; name: string },
 	course: CourseRow,
-): Promise<{ participant: ParticipantRow; budget: BreakBudgetResult }> {
+): Promise<{ participant: { id: number; name: string; status: ParticipantStatus }; budget: BreakBudgetResult }> {
 	const events = await fetchRecentParticipantEvents(db, participant.id);
 	const budget = computeBreakBudgetFromEvents(events, course.daily_break_budget_minutes, course.timezone);
-	const status: ParticipantRow["status"] = budget.isOnBreakNow ? "on_break" : "present";
-	return { participant: { ...participant, status }, budget };
+	const status: ParticipantStatus = !budget.hasActivityToday ? "unknown" : budget.isOnBreakNow ? "on_break" : "present";
+	return { participant: { id: participant.id, name: participant.name, status }, budget };
 }
 
 export const checkinRouter = Router({ base: "/api/checkin" });
@@ -57,7 +67,15 @@ checkinRouter.get("/:checkinCode", async (request: IRequest, env: Env) => {
 	if (!course) {
 		return Response.json({ error: "Kurs nicht gefunden" }, { status: 404 });
 	}
-	return Response.json({ course: { name: course.name, dailyBreakBudgetMinutes: course.daily_break_budget_minutes } });
+	const { leftImageId, rightImageId } = await resolveHeaderImageIds(env.DB, course);
+	return Response.json({
+		course: {
+			name: course.name,
+			dailyBreakBudgetMinutes: course.daily_break_budget_minutes,
+			headerLeftImageId: leftImageId,
+			headerRightImageId: rightImageId,
+		},
+	});
 });
 
 checkinRouter.get("/:checkinCode/qrcode.svg", async (request: IRequest, env: Env) => {
@@ -76,30 +94,82 @@ checkinRouter.get("/:checkinCode/qrcode.svg", async (request: IRequest, env: Env
 	});
 });
 
-checkinRouter.post("/:checkinCode/register", async (request: IRequest, env: Env) => {
+// Namen bereits registrierter Teilnehmer für das Auswahl-Dropdown auf der
+// Check-in-Seite (kein Login nötig, enthält keine sensiblen Daten).
+checkinRouter.get("/:checkinCode/participants", async (request: IRequest, env: Env) => {
+	const course = await getActiveCourseByCheckinCode(env.DB, request.params.checkinCode);
+	if (!course) {
+		return Response.json({ error: "Kurs nicht gefunden" }, { status: 404 });
+	}
+	const { results } = await env.DB.prepare(
+		"SELECT name FROM participants WHERE course_id = ?1 ORDER BY name COLLATE NOCASE ASC",
+	)
+		.bind(course.id)
+		.all<{ name: string }>();
+	return Response.json({ names: results.map((row) => row.name) });
+});
+
+// Vereint Neuregistrierung und Login: Name unbekannt -> neuer Teilnehmer
+// mit dem angegebenen Passwort; Name bekannt ohne Passwort (Altbestand)
+// -> das jetzt eingegebene Passwort wird übernommen; Name bekannt mit
+// Passwort -> muss übereinstimmen.
+checkinRouter.post("/:checkinCode/login", async (request: IRequest, env: Env) => {
 	const course = await getActiveCourseByCheckinCode(env.DB, request.params.checkinCode);
 	if (!course) {
 		return Response.json({ error: "Kurs nicht gefunden" }, { status: 404 });
 	}
 
-	const body = (await request.json().catch(() => null)) as { name?: string } | null;
+	const body = (await request.json().catch(() => null)) as { name?: string; password?: string } | null;
 	const name = body?.name?.trim();
-	if (!name) {
-		return Response.json({ error: "Name ist erforderlich" }, { status: 400 });
+	const password = body?.password ?? "";
+
+	if (!name || password.length < MIN_PASSWORD_LENGTH) {
+		return Response.json(
+			{ error: `Name und ein Passwort mit mindestens ${MIN_PASSWORD_LENGTH} Zeichen sind erforderlich.` },
+			{ status: 400 },
+		);
 	}
 
-	const accessToken = randomToken(PARTICIPANT_TOKEN_BYTES);
-	const participant = await env.DB.prepare(
-		"INSERT INTO participants (course_id, name, access_token) VALUES (?1, ?2, ?3) RETURNING id, name, status",
+	const existing = await env.DB.prepare(
+		"SELECT id, name, access_token, password_hash FROM participants WHERE course_id = ?1 AND name = ?2 COLLATE NOCASE",
 	)
-		.bind(course.id, name, accessToken)
+		.bind(course.id, name)
 		.first<ParticipantRow>();
 
-	await env.DB.prepare("INSERT INTO checkin_events (participant_id, course_id, event_type) VALUES (?1, ?2, 'check_in')")
-		.bind(participant!.id, course.id)
-		.run();
+	let participant: { id: number; name: string };
+	let accessToken: string;
 
-	return Response.json({ accessToken, ...(await loadParticipantView(env.DB, participant!, course)) });
+	if (!existing) {
+		accessToken = randomToken(PARTICIPANT_TOKEN_BYTES);
+		const passwordHash = await hashParticipantPassword(password);
+		let created: { id: number; name: string } | null;
+		try {
+			created = await env.DB.prepare(
+				"INSERT INTO participants (course_id, name, access_token, password_hash) VALUES (?1, ?2, ?3, ?4) RETURNING id, name",
+			)
+				.bind(course.id, name, accessToken, passwordHash)
+				.first<{ id: number; name: string }>();
+		} catch {
+			return Response.json({ error: "Dieser Name wurde gerade eben schon vergeben. Bitte Seite neu laden." }, { status: 409 });
+		}
+		participant = created!;
+		await env.DB.prepare("INSERT INTO checkin_events (participant_id, course_id, event_type) VALUES (?1, ?2, 'check_in')")
+			.bind(participant.id, course.id)
+			.run();
+	} else if (!existing.password_hash) {
+		const passwordHash = await hashParticipantPassword(password);
+		await env.DB.prepare("UPDATE participants SET password_hash = ?1 WHERE id = ?2").bind(passwordHash, existing.id).run();
+		participant = { id: existing.id, name: existing.name };
+		accessToken = existing.access_token;
+	} else {
+		if (!(await verifyParticipantPassword(existing.password_hash, password))) {
+			return Response.json({ error: "Falsches Passwort" }, { status: 401 });
+		}
+		participant = { id: existing.id, name: existing.name };
+		accessToken = existing.access_token;
+	}
+
+	return Response.json({ accessToken, ...(await loadParticipantView(env.DB, participant, course)) });
 });
 
 checkinRouter.get("/:checkinCode/me", async (request: IRequest, env: Env) => {
@@ -121,6 +191,10 @@ checkinRouter.get("/:checkinCode/me", async (request: IRequest, env: Env) => {
 	return Response.json(await loadParticipantView(env.DB, participant, course));
 });
 
+// Ohne body: normaler Toggle (present<->on_break) anhand des aktuellen,
+// tagesbezogenen Status. Mit body.status: expliziter Zielstatus – nötig,
+// wenn der aktuelle Status "unknown" ist (erste Aktion des Tages), da man
+// von dort nicht "umschalten" kann, sondern explizit wählen muss.
 checkinRouter.post("/:checkinCode/toggle", async (request: IRequest, env: Env) => {
 	const course = await getActiveCourseByCheckinCode(env.DB, request.params.checkinCode);
 	if (!course) {
@@ -137,11 +211,11 @@ checkinRouter.post("/:checkinCode/toggle", async (request: IRequest, env: Env) =
 		return Response.json({ error: "Teilnehmer nicht gefunden" }, { status: 404 });
 	}
 
-	// Richtung des Toggles anhand des tagesbezogenen, aus dem Event-Log
-	// abgeleiteten Status bestimmen – nicht anhand der möglicherweise
-	// seit gestern veralteten participants.status-Spalte.
+	const body = (await request.json().catch(() => null)) as { status?: string } | null;
+	const requestedStatus = body?.status === "present" || body?.status === "on_break" ? body.status : null;
+
 	const before = await loadParticipantView(env.DB, participant, course);
-	const newStatus = before.participant.status === "present" ? "on_break" : "present";
+	const newStatus = requestedStatus ?? (before.participant.status === "on_break" ? "present" : "on_break");
 	const eventType = newStatus === "on_break" ? "check_out" : "check_in";
 
 	await env.DB.batch([

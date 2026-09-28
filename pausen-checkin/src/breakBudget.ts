@@ -7,6 +7,10 @@ export interface BreakBudgetResult {
 	usedMinutesToday: number;
 	remainingMinutesToday: number;
 	isOnBreakNow: boolean;
+	// Kein einziges Event heute -> Anwesenheit ist unbekannt (weder
+	// "anwesend" noch "in der Pause" kann angenommen werden), betrifft nur
+	// die Live-Ansicht des aktuellen Tages, nicht historische Tage.
+	hasActivityToday: boolean;
 }
 
 export function localDateString(date: Date, timeZone: string): string {
@@ -59,10 +63,12 @@ export function computeBreakBudgetFromEvents(
 ): BreakBudgetResult {
 	const today = localDateString(new Date(), timezone);
 	const { usedMinutes, isOnBreakNow } = computeUsedMinutesForDate(events, timezone, today);
+	const hasActivityToday = events.some((event) => localDateString(new Date(event.occurred_at), timezone) === today);
 	return {
 		usedMinutesToday: usedMinutes,
 		remainingMinutesToday: Math.max(0, dailyBudgetMinutes - usedMinutes),
 		isOnBreakNow,
+		hasActivityToday,
 	};
 }
 

@@ -1,4 +1,5 @@
 import { api } from "/api.js";
+import { renderBrandHeader } from "/brandHeader.js";
 
 const POLL_INTERVAL_MS = 5000;
 
@@ -6,9 +7,10 @@ function tokenKey(checkinCode) {
 	return `pausenCheckin.access.${checkinCode}`;
 }
 
-function budgetBarClass(budget) {
-	if (budget.remainingMinutesToday <= 0) return "empty";
-	if (budget.remainingMinutesToday <= budget.dailyBreakBudgetMinutes * 0.2) return "low";
+function budgetBarClass(usedMinutes, dailyBudget) {
+	const remaining = dailyBudget - usedMinutes;
+	if (remaining <= 0) return "empty";
+	if (remaining <= dailyBudget * 0.2) return "low";
 	return "";
 }
 
@@ -34,30 +36,81 @@ export async function renderCheckin(root, checkinCode) {
 		}
 	}
 
-	renderRegistration(root, checkinCode, course);
+	renderLogin(root, checkinCode, course);
 }
 
-function renderRegistration(root, checkinCode, course) {
+async function renderLogin(root, checkinCode, course) {
+	let names = [];
+	try {
+		({ names } = await api.getCheckinParticipantNames(checkinCode));
+	} catch {
+		// Ohne Namensliste geht es auch, dann eben nur Freitext-Eingabe.
+	}
+
+	const hasNames = names.length > 0;
+
 	root.innerHTML = `
+		${renderBrandHeader(course)}
 		<h1>${course.name}</h1>
 		<p class="muted">Tägliches Pausenbudget: ${course.dailyBreakBudgetMinutes} Minuten</p>
 		<div class="card">
 			<h2>Anmelden</h2>
-			<form id="register-form">
-				<label for="name">Dein Name</label>
-				<input type="text" id="name" required autofocus />
-				<div id="register-error"></div>
-				<button type="submit">Loslegen</button>
+			<form id="login-form">
+				${
+					hasNames
+						? `<label for="name-select">Dein Name</label>
+						<select id="name-select">
+							<option value="">-- Auswählen --</option>
+							${names.map((n) => `<option value="${n}">${n}</option>`).join("")}
+							<option value="__new__">Ich bin neu / nicht in der Liste</option>
+						</select>
+						<div id="new-name-wrapper" hidden>
+							<label for="new-name">Dein Name</label>
+							<input type="text" id="new-name" />
+						</div>`
+						: `<label for="new-name">Dein Name</label>
+						<input type="text" id="new-name" autofocus required />`
+				}
+
+				<label for="password">Passwort</label>
+				<input type="password" id="password" minlength="4" required />
+				<p class="muted">
+					Neu hier? Vergib jetzt ein Passwort. Schon registriert? Gib dein Passwort ein
+					${hasNames ? "(hast du noch keins, wird dein jetziges als neues Passwort übernommen)" : ""}.
+				</p>
+
+				<div id="login-error"></div>
+				<button type="submit">Anmelden</button>
 			</form>
 		</div>
 	`;
 
-	root.querySelector("#register-form").addEventListener("submit", async (event) => {
+	const nameSelect = root.querySelector("#name-select");
+	const newNameWrapper = root.querySelector("#new-name-wrapper");
+	if (nameSelect) {
+		nameSelect.addEventListener("change", () => {
+			const isNew = nameSelect.value === "__new__";
+			newNameWrapper.hidden = !isNew;
+			if (isNew) root.querySelector("#new-name").focus();
+		});
+	}
+
+	root.querySelector("#login-form").addEventListener("submit", async (event) => {
 		event.preventDefault();
-		const errorBox = root.querySelector("#register-error");
-		const name = root.querySelector("#name").value.trim();
+		const errorBox = root.querySelector("#login-error");
+		errorBox.textContent = "";
+
+		const name = (nameSelect && nameSelect.value !== "__new__" ? nameSelect.value : root.querySelector("#new-name")?.value)?.trim();
+		const password = root.querySelector("#password").value;
+
+		if (!name) {
+			errorBox.textContent = "Bitte einen Namen angeben.";
+			errorBox.className = "error";
+			return;
+		}
+
 		try {
-			const result = await api.registerParticipant(checkinCode, name);
+			const result = await api.loginParticipant(checkinCode, name, password);
 			localStorage.setItem(tokenKey(checkinCode), result.accessToken);
 			renderStatus(root, checkinCode, course, result.accessToken, result);
 		} catch (error) {
@@ -69,57 +122,74 @@ function renderRegistration(root, checkinCode, course) {
 
 function renderStatus(root, checkinCode, course, accessToken, data) {
 	let pollTimer = null;
-	let toggleInFlight = false;
+	let actionInFlight = false;
+
+	async function performToggle(explicitStatus) {
+		if (actionInFlight) return;
+		actionInFlight = true;
+		try {
+			const result = await api.toggleCheckin(checkinCode, accessToken, explicitStatus);
+			paint(result);
+		} catch (error) {
+			if (error.status === 401 || error.status === 404) {
+				localStorage.removeItem(tokenKey(checkinCode));
+				clearInterval(pollTimer);
+				renderLogin(root, checkinCode, course);
+				return;
+			}
+		} finally {
+			actionInFlight = false;
+		}
+	}
 
 	function paint({ participant, budget }) {
-		const isPresent = participant.status === "present";
+		const statusLabel = { present: "Anwesend", on_break: "In der Pause", unknown: "Unbekannt" }[participant.status];
+
+		let actionHtml;
+		if (participant.status === "unknown") {
+			actionHtml = `
+				<p class="muted" style="margin-top: 20px;">Noch keine Aktion heute – wie startest du?</p>
+				<div class="choice-row">
+					<button type="button" id="choose-present">Ich bin da</button>
+					<button type="button" id="choose-break" class="secondary">Ich mache Pause</button>
+				</div>
+			`;
+		} else {
+			const isPresent = participant.status === "present";
+			actionHtml = `
+				<p class="muted" style="margin-top: 20px;">
+					Pausenbudget heute: ${budget.usedMinutesToday} / ${course.dailyBreakBudgetMinutes} Min. verbraucht
+				</p>
+				<div class="budget-bar ${budgetBarClass(budget.usedMinutesToday, course.dailyBreakBudgetMinutes)}">
+					<span style="width: ${Math.min(100, (budget.usedMinutesToday / course.dailyBreakBudgetMinutes) * 100)}%"></span>
+				</div>
+				<p>${budget.remainingMinutesToday} Minuten übrig</p>
+				<button type="button" id="toggle" class="toggle-button ${participant.status}">
+					${isPresent ? "Pause beginnen" : "Zurück von der Pause"}
+				</button>
+			`;
+		}
+
 		root.innerHTML = `
+			${renderBrandHeader(course)}
 			<h1>${course.name}</h1>
 			<div class="card center">
 				<p class="muted">Angemeldet als</p>
 				<h2>${participant.name}</h2>
-				<p><span class="status-badge ${participant.status}">${isPresent ? "Anwesend" : "In der Pause"}</span></p>
-
-				<p class="muted" style="margin-top: 20px;">
-					Pausenbudget heute: ${budget.usedMinutesToday} / ${course.dailyBreakBudgetMinutes} Min. verbraucht
-				</p>
-				<div class="budget-bar ${budgetBarClass({ ...budget, dailyBreakBudgetMinutes: course.dailyBreakBudgetMinutes })}">
-					<span style="width: ${Math.min(100, (budget.usedMinutesToday / course.dailyBreakBudgetMinutes) * 100)}%"></span>
-				</div>
-				<p>${budget.remainingMinutesToday} Minuten übrig</p>
-
-				<button type="button" id="toggle" class="toggle-button ${participant.status}">
-					${isPresent ? "Pause beginnen" : "Zurück von der Pause"}
-				</button>
+				<p><span class="status-badge ${participant.status}">${statusLabel}</span></p>
+				${actionHtml}
 			</div>
 		`;
 
-		root.querySelector("#toggle").addEventListener("click", async () => {
-			if (toggleInFlight) return;
-			toggleInFlight = true;
-			const button = root.querySelector("#toggle");
-			button.disabled = true;
-			try {
-				const result = await api.toggleCheckin(checkinCode, accessToken);
-				paint(result);
-			} catch (error) {
-				if (error.status === 401 || error.status === 404) {
-					localStorage.removeItem(tokenKey(checkinCode));
-					clearInterval(pollTimer);
-					renderRegistration(root, checkinCode, course);
-					return;
-				}
-				button.disabled = false;
-			} finally {
-				toggleInFlight = false;
-			}
-		});
+		root.querySelector("#toggle")?.addEventListener("click", () => performToggle());
+		root.querySelector("#choose-present")?.addEventListener("click", () => performToggle("present"));
+		root.querySelector("#choose-break")?.addEventListener("click", () => performToggle("on_break"));
 	}
 
 	paint(data);
 
 	pollTimer = setInterval(async () => {
-		if (toggleInFlight) return;
+		if (actionInFlight) return;
 		try {
 			const me = await api.getMe(checkinCode, accessToken);
 			paint(me);
@@ -127,7 +197,7 @@ function renderStatus(root, checkinCode, course, accessToken, data) {
 			if (error.status === 401 || error.status === 404) {
 				localStorage.removeItem(tokenKey(checkinCode));
 				clearInterval(pollTimer);
-				renderRegistration(root, checkinCode, course);
+				renderLogin(root, checkinCode, course);
 			}
 		}
 	}, POLL_INTERVAL_MS);

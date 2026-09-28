@@ -1,6 +1,8 @@
 import { api } from "/api.js";
+import { renderBrandHeader } from "/brandHeader.js";
 
 const POLL_INTERVAL_MS = 5000;
+const STATUS_LABELS = { present: "Anwesend", on_break: "In der Pause", unknown: "Unbekannt" };
 
 function budgetBarClass(usedMinutes, dailyBudget) {
 	const remaining = dailyBudget - usedMinutes;
@@ -10,12 +12,11 @@ function budgetBarClass(usedMinutes, dailyBudget) {
 }
 
 function participantRow(participant, dailyBudget) {
-	const isPresent = participant.status === "present";
 	const percent = Math.min(100, (participant.usedMinutesToday / dailyBudget) * 100);
 	return `
 		<tr>
 			<td>${participant.name}</td>
-			<td><span class="status-badge ${participant.status}">${isPresent ? "Anwesend" : "In der Pause"}</span></td>
+			<td><span class="status-badge ${participant.status}">${STATUS_LABELS[participant.status]}</span></td>
 			<td>
 				<div class="budget-bar ${budgetBarClass(participant.usedMinutesToday, dailyBudget)}">
 					<span style="width: ${percent}%"></span>
@@ -24,17 +25,6 @@ function participantRow(participant, dailyBudget) {
 			<td>${participant.remainingMinutesToday} / ${dailyBudget} Min.</td>
 		</tr>
 	`;
-}
-
-function courseDateRange(startDate, durationDays) {
-	const [y, m, d] = startDate.split("-").map(Number);
-	const dates = [];
-	for (let i = 0; i < durationDays; i++) {
-		const date = new Date(Date.UTC(y, m - 1, d));
-		date.setUTCDate(date.getUTCDate() + i);
-		dates.push(date.toISOString().slice(0, 10));
-	}
-	return dates;
 }
 
 function formatShortDate(dateStr) {
@@ -89,39 +79,36 @@ async function loadDayDetail(dashboardToken, course, date, container) {
 }
 
 async function renderHistorySection(container, dashboardToken, course) {
+	let availableDays = [];
+	try {
+		({ days: availableDays } = await api.getDashboardDays(dashboardToken));
+	} catch {
+		container.innerHTML = "";
+		return;
+	}
+
+	if (availableDays.length === 0) {
+		container.innerHTML = "";
+		return;
+	}
+
 	container.innerHTML = `
 		<h2>Verlauf</h2>
 		<div class="card">
+			<p class="muted">Nur Tage mit erfassten Daten werden angezeigt.</p>
 			<div id="calendar-grid" class="link-row"></div>
 			<div id="day-detail" style="margin-top: 14px;"></div>
 		</div>
 	`;
 
-	let availableDays = [];
-	try {
-		({ days: availableDays } = await api.getDashboardDays(dashboardToken));
-	} catch {
-		// Kalender ohne Datenindikator anzeigen, falls die Abfrage fehlschlägt
-	}
-
 	const grid = container.querySelector("#calendar-grid");
 	const detail = container.querySelector("#day-detail");
-	const todayLocal = new Date().toISOString().slice(0, 10);
 
-	courseDateRange(course.startDate, course.durationDays).forEach((date) => {
-		const hasData = availableDays.includes(date);
+	availableDays.forEach((date) => {
 		const button = document.createElement("button");
 		button.type = "button";
 		button.className = "secondary";
 		button.textContent = formatShortDate(date);
-		if (date > todayLocal) {
-			button.disabled = true;
-			button.title = "Liegt in der Zukunft";
-		}
-		if (hasData) {
-			button.style.borderColor = "var(--color-present)";
-			button.style.fontWeight = "700";
-		}
 		button.addEventListener("click", () => loadDayDetail(dashboardToken, course, date, detail));
 		grid.appendChild(button);
 	});
@@ -140,6 +127,7 @@ export async function renderDashboard(root, dashboardToken) {
 
 	const checkinUrl = `${window.location.origin}/k/${course.checkinCode}`;
 	root.innerHTML = `
+		${renderBrandHeader(course)}
 		<nav class="top">
 			<div>
 				<h1 id="course-name"></h1>
