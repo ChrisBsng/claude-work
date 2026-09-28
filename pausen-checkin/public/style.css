@@ -590,3 +590,8 @@ tr.just-returned {
 tr.just-returned td:first-child {
 	font-weight: 700;
 }
+
+.budget-overage {
+	color: var(--color-danger);
+	font-weight: 600;
+}

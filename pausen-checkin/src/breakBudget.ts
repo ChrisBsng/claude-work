@@ -6,6 +6,7 @@ export interface CheckinEventRow {
 export interface BreakBudgetResult {
 	usedMinutesToday: number;
 	remainingMinutesToday: number;
+	overMinutesToday: number;
 	isOnBreakNow: boolean;
 	// Kein einziges Event heute -> Anwesenheit ist unbekannt (weder
 	// "anwesend" noch "in der Pause" kann angenommen werden), betrifft nur
@@ -67,6 +68,7 @@ export function computeBreakBudgetFromEvents(
 	return {
 		usedMinutesToday: usedMinutes,
 		remainingMinutesToday: Math.max(0, dailyBudgetMinutes - usedMinutes),
+		overMinutesToday: Math.max(0, usedMinutes - dailyBudgetMinutes),
 		isOnBreakNow,
 		hasActivityToday,
 	};

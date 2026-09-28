@@ -369,13 +369,17 @@ adminRouter.get("/courses/:id/export.xlsx", requireReadAccess, async (request: I
 				usedMinutes,
 				course.daily_break_budget_minutes,
 				Math.max(0, course.daily_break_budget_minutes - usedMinutes),
+				Math.max(0, usedMinutes - course.daily_break_budget_minutes),
 			]);
 		}
 	}
 
 	const breakSheet: XlsxSheet = {
 		name: "Pausenzeiten",
-		rows: [["Name", "Datum", "Pausenzeit (Min)", "Tagesbudget (Min)", "Verbleibend (Min)"], ...breakRows],
+		rows: [
+			["Name", "Datum", "Pausenzeit (Min)", "Tagesbudget (Min)", "Verbleibend (Min)", "Überschreitung (Min)"],
+			...breakRows,
+		],
 	};
 
 	const eventRows: XlsxCell[][] = [];

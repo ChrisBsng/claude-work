@@ -223,7 +223,11 @@ function renderStatus(root, checkinCode, course, accessToken, data) {
 				<div class="budget-bar ${budgetBarClass(budget.usedMinutesToday, course.dailyBreakBudgetMinutes)}">
 					<span style="width: ${Math.min(100, (budget.usedMinutesToday / course.dailyBreakBudgetMinutes) * 100)}%"></span>
 				</div>
-				<p>${budget.remainingMinutesToday} Minuten übrig</p>
+				${
+					budget.overMinutesToday > 0
+						? `<p class="budget-overage">Budget um ${budget.overMinutesToday} Min. überschritten</p>`
+						: `<p>${budget.remainingMinutesToday} Minuten übrig</p>`
+				}
 			`
 				: "";
 			actionHtml = `

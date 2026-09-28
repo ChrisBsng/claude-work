@@ -32,7 +32,13 @@ function participantRow(participant, dailyBudget, hasBreakTracking, justReturned
 					<span style="width: ${percent}%"></span>
 				</div>
 			</td>
-			<td>${participant.remainingMinutesToday} / ${dailyBudget} Min.</td>
+			<td>
+				${
+					participant.overMinutesToday > 0
+						? `<span class="budget-overage">+${participant.overMinutesToday} Min. über Budget</span>`
+						: `${participant.remainingMinutesToday} / ${dailyBudget} Min.`
+				}
+			</td>
 		</tr>
 	`;
 }
@@ -74,6 +80,11 @@ async function loadDayDetail(dashboardToken, course, date, container) {
 												<span style="width: ${Math.min(100, (p.usedMinutes / course.dailyBreakBudgetMinutes) * 100)}%"></span>
 											</div>
 											${p.usedMinutes} / ${course.dailyBreakBudgetMinutes} Min.
+											${
+												p.usedMinutes > course.dailyBreakBudgetMinutes
+													? `<span class="budget-overage"> (+${p.usedMinutes - course.dailyBreakBudgetMinutes} Min. über Budget)</span>`
+													: ""
+											}
 										</td>
 									</tr>`,
 									)
