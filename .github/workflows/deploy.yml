@@ -47,6 +47,11 @@ jobs:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           workingDirectory: pausen-checkin
+          # CUSTOM_DOMAIN kommt aus einer GitHub-Actions-Repository-Variable
+          # (Settings -> Secrets and variables -> Actions -> Variables).
+          # Leer, wenn nicht gesetzt -> Worker fällt auf die anfragende
+          # Domain zurück (siehe src/baseUrl.ts).
+          command: deploy --var CUSTOM_DOMAIN:${{ vars.CUSTOM_DOMAIN }}
           secrets: |
             ADMIN_PASSWORD
         env:

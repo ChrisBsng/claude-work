@@ -1,1 +1,4 @@
 ADMIN_PASSWORD=change-me
+# Optional. Wenn gesetzt, nutzen alle erzeugten URLs/QR-Codes diese Domain
+# statt der Domain, über die lokal zugegriffen wird.
+CUSTOM_DOMAIN=

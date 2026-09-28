@@ -1,5 +1,6 @@
 import { api } from "/api.js";
 import { renderBrandHeader } from "/brandHeader.js";
+import { getBaseUrl } from "/baseUrl.js";
 
 const POLL_INTERVAL_MS = 5000;
 const STATUS_LABELS = { present: "Anwesend", on_break: "In der Pause", unknown: "Unbekannt" };
@@ -133,7 +134,7 @@ export async function renderDashboard(root, dashboardToken) {
 		return;
 	}
 
-	const checkinUrl = `${window.location.origin}/k/${course.checkinCode}`;
+	const checkinUrl = `${await getBaseUrl()}/k/${course.checkinCode}`;
 	root.innerHTML = `
 		${renderBrandHeader(course)}
 		<nav class="top">

@@ -1,4 +1,5 @@
 import { api } from "/api.js";
+import { getBaseUrl } from "/baseUrl.js";
 
 const TOKEN_KEY = "pausenCheckin.adminToken";
 
@@ -14,8 +15,8 @@ function clearToken() {
 	sessionStorage.removeItem(TOKEN_KEY);
 }
 
-function courseUrl(path) {
-	return `${window.location.origin}${path}`;
+async function courseUrl(path) {
+	return `${await getBaseUrl()}${path}`;
 }
 
 async function copyToClipboard(text, button) {
@@ -385,8 +386,8 @@ async function renderCourseDetail(container, token, state, { handleAuthError, re
 }
 
 async function renderCourseOverviewTab(container, token, course, { handleAuthError, refreshThisCourse }) {
-	const dashboardUrl = courseUrl(`/d/${course.dashboardToken}`);
-	const checkinUrl = courseUrl(`/k/${course.checkinCode}`);
+	const dashboardUrl = await courseUrl(`/d/${course.dashboardToken}`);
+	const checkinUrl = await courseUrl(`/k/${course.checkinCode}`);
 
 	container.innerHTML = `
 		<div class="card">

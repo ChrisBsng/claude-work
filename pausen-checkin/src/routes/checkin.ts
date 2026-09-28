@@ -2,6 +2,7 @@ import { Router, type IRequest } from "itty-router";
 import type { Env } from "../env";
 import { computeBreakBudgetFromEvents, fetchRecentParticipantEvents, type BreakBudgetResult } from "../breakBudget";
 import { hashParticipantPassword, randomToken, verifyParticipantPassword } from "../crypto";
+import { resolveBaseUrl } from "../baseUrl";
 import { resolveHeaderImageIds } from "../images";
 import { renderQrCodeSvg } from "../qrcode";
 
@@ -101,7 +102,7 @@ checkinRouter.get("/:checkinCode/qrcode.svg", async (request: IRequest, env: Env
 		return Response.json({ error: "Kurs nicht gefunden" }, { status: 404 });
 	}
 
-	const checkinUrl = new URL(`/k/${request.params.checkinCode}`, request.url).toString();
+	const checkinUrl = new URL(`/k/${request.params.checkinCode}`, resolveBaseUrl(env, request)).toString();
 	const svg = renderQrCodeSvg(checkinUrl);
 	return new Response(svg, {
 		headers: {
