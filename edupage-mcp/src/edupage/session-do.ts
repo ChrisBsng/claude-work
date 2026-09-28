@@ -77,20 +77,37 @@ export class EdupageSessionDO extends DurableObject<Env> {
 
 		const cookie = extractCookieHeader(loginResponse.headers);
 		if (!cookie) {
-			throw new Error("Edupage-Login fehlgeschlagen: keine Session-Cookie erhalten. domain/username/password prüfen.");
+			throw new Error(
+				`Edupage-Login fehlgeschlagen: keine Session-Cookie erhalten (HTTP ${loginResponse.status}, ` +
+					`Location: ${loginResponse.headers.get("location")}). domain/username/password prüfen.`,
+			);
 		}
 
 		const dashboardResponse = await fetch(`${baseUrl}/dashboard/eb.php`, {
 			headers: { Cookie: cookie },
+			redirect: "manual",
 		});
 		const html = await dashboardResponse.text();
 
 		const match = html.match(/\.userhome\((\{[\s\S]*?\})\);/);
 		if (!match) {
+			// TEMPORÄR: Diagnose-Ausgabe zum Herausfinden des tatsächlichen
+			// Edupage-Seitenformats. Wird entfernt, sobald das Pattern feststeht.
 			throw new Error(
-				"Login schien zu funktionieren, aber die Dashboard-Seite enthielt nicht die erwarteten " +
-					"eingebetteten Daten (.userhome(...)). Entweder hat Edupage sein Seitenlayout geändert, " +
-					"oder domain/username/password sind falsch.",
+				"DEBUG login=" +
+					loginResponse.status +
+					" loc=" +
+					(loginResponse.headers.get("location") ?? "none") +
+					" dash=" +
+					dashboardResponse.status +
+					" dashLoc=" +
+					(dashboardResponse.headers.get("location") ?? "none") +
+					" hasGsechash=" +
+					html.includes("gsechash") +
+					" htmlLen=" +
+					html.length +
+					" snippet=" +
+					html.slice(0, 1200).replace(/\s+/g, " "),
 			);
 		}
 
