@@ -544,21 +544,26 @@ export class EdupageSessionDO extends DurableObject<Env> {
 	/**
 	 * Lädt eine Dashboard-Seite und liest die `gpid` (Gadget-Instanz-ID, z. B.
 	 * aus `<div id="gip19737901" ...>`) heraus, die für nachfolgende
-	 * `gcall`-Aufrufe an dieses Widget gebraucht wird.
+	 * `gcall`-Aufrufe an dieses Widget gebraucht wird. Dashboard-Seiten
+	 * verschachteln oft einen generischen "DashboardDiv"-Wrapper-Gadget
+	 * (äußere gpid) um das eigentliche Modul-Widget (innere gpid) - nur die
+	 * innerste/letzte gpid im HTML reagiert auf die modulspezifischen
+	 * Aktionen (z. B. "refresh" mit einem Datum), die äußere liefert nur
+	 * einen generischen Fehler.
 	 */
 	private async getGpid(credentials: EdupageCredentials, path: string): Promise<string> {
 		const baseUrl = this.buildBaseUrl(credentials.domain);
 		const session = await this.ensureSession(credentials);
 		const response = await fetch(`${baseUrl}${path}`, { headers: { Cookie: session.cookie } });
 		const html = await response.text();
-		const match = html.match(/id=["']gip(\d+)["']/);
-		if (!match) {
+		const matches = [...html.matchAll(/id=["']gip(\d+)["']/g)];
+		if (matches.length === 0) {
 			throw new Error(
 				`Konnte keine Gadget-ID (gpid) auf "${path}" finden. Entweder hat Edupage das Seitenlayout ` +
 					"geändert, oder dieses Modul ist für den Account nicht verfügbar/aktiviert.",
 			);
 		}
-		return match[1];
+		return matches[matches.length - 1][1];
 	}
 
 	/**
