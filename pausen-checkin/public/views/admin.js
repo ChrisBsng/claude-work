@@ -16,11 +16,12 @@ function courseDateRange(startDate, durationDays) {
 }
 
 function formatDurationLabel(minutes) {
-	const schulstunden = minutes / SCHULSTUNDE_MINUTES;
+	const schulstunden = Math.round((minutes / SCHULSTUNDE_MINUTES) * 10) / 10;
+	const schulstundenLabel = Number.isInteger(schulstunden) ? String(schulstunden) : schulstunden.toFixed(1);
 	const hours = Math.floor(minutes / 60);
 	const remainderMinutes = minutes % 60;
 	const hoursLabel = remainderMinutes > 0 ? `${hours} h ${remainderMinutes} min` : `${hours} h`;
-	return `${schulstunden} Schulstunde${schulstunden === 1 ? "" : "n"} (${hoursLabel})`;
+	return `${schulstundenLabel} Schulstunde${schulstunden === 1 ? "" : "n"} (${hoursLabel})`;
 }
 
 function getToken() {
@@ -891,6 +892,7 @@ async function renderCourseReportTab(container, token, course, { handleAuthError
 			</div>
 			<div class="card" id="worklog-report-card" ${course.hasWorklogTracking ? "" : "hidden"}>
 				<h2>Worklog-Report</h2>
+				<p class="muted">Die Worklog-Daten sind im Excel-Export oben (Blätter „Worklog-Übersicht", „Worklog nach Gruppe", „Worklog-Einträge") enthalten.</p>
 				<div id="worklog-report-body"><p class="muted">Lädt…</p></div>
 			</div>
 		`;
@@ -924,7 +926,7 @@ async function renderWorklogReport(container, token, course, { handleAuthError }
 			.map(
 				(group) => `
 					<tr>
-						<td>${group.label}</td>
+						<td>${group.groupName}</td>
 						<td>${group.memberCount}</td>
 						<td>${formatDurationLabel(group.totalMinutes)}</td>
 						<td>${group.totalDays > 0 ? Math.round((group.completeDays / group.totalDays) * 100) : 0}% (${group.completeDays}/${group.totalDays} Tage)</td>

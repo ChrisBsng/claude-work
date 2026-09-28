@@ -373,7 +373,61 @@ adminRouter.get("/courses/:id/export.xlsx", requireAdmin, async (request: IReque
 		rows: [["Name", "Ereignis", "Zeitpunkt"], ...eventRows],
 	};
 
-	const xlsxBytes = buildXlsx([participantsSheet, breakSheet, eventsSheet]);
+	const sheets: XlsxSheet[] = [participantsSheet, breakSheet, eventsSheet];
+
+	if (course.has_worklog_tracking && course.daily_worklog_minutes) {
+		const report = await buildWorklogReport(env.DB, course);
+
+		const worklogOverviewRows: XlsxCell[][] = report.participants.map((p) => [
+			p.name,
+			p.groupName ?? "Ohne Gruppe",
+			p.totalMinutes,
+			p.completeDays,
+			p.totalDays,
+			p.totalDays > 0 ? Math.round((p.completeDays / p.totalDays) * 1000) / 10 : 0,
+		]);
+		sheets.push({
+			name: "Worklog-Übersicht",
+			rows: [
+				["Name", "Gruppe", "Summe (Min)", "Vollständige Tage", "Projekttage (bisher)", "Vollständigkeit (%)"],
+				...worklogOverviewRows,
+			],
+		});
+
+		const worklogGroupRows: XlsxCell[][] = report.groups.map((g) => [
+			g.groupName,
+			g.memberCount,
+			g.totalMinutes,
+			g.completeDays,
+			g.totalDays,
+			g.totalDays > 0 ? Math.round((g.completeDays / g.totalDays) * 1000) / 10 : 0,
+		]);
+		sheets.push({
+			name: "Worklog nach Gruppe",
+			rows: [["Gruppe", "Mitglieder", "Summe (Min)", "Vollständige Tage", "Personentage gesamt", "Vollständigkeit (%)"], ...worklogGroupRows],
+		});
+
+		const { results: worklogEntries } = await env.DB.prepare(
+			`SELECT p.name AS participant_name, g.name AS group_name, w.date, w.task, w.minutes
+			 FROM worklog_entries w
+			 JOIN participants p ON p.id = w.participant_id
+			 LEFT JOIN groups g ON g.id = p.group_id
+			 WHERE w.course_id = ?1
+			 ORDER BY w.date ASC, p.name COLLATE NOCASE ASC, w.created_at ASC`,
+		)
+			.bind(course.id)
+			.all<{ participant_name: string; group_name: string | null; date: string; task: string; minutes: number }>();
+
+		sheets.push({
+			name: "Worklog-Einträge",
+			rows: [
+				["Datum", "Name", "Gruppe", "Task", "Minuten"],
+				...worklogEntries.map((e) => [e.date, e.participant_name, e.group_name ?? "Ohne Gruppe", e.task, e.minutes]),
+			],
+		});
+	}
+
+	const xlsxBytes = buildXlsx(sheets);
 	const safeFileName = course.name.replace(/[^\p{L}\p{N}\- ]+/gu, "").trim().replace(/\s+/g, "-") || `kurs-${course.id}`;
 
 	return new Response(xlsxBytes, {
@@ -613,22 +667,16 @@ adminRouter.put("/courses/:id/project-days", requireAdmin, async (request: IRequ
 	return Response.json({ dates: dates.sort() });
 });
 
-adminRouter.get("/courses/:id/worklog-report", requireAdmin, async (request: IRequest, env: Env) => {
-	const course = await loadCourseOr404(env.DB, Number(request.params.id));
-	if (!course) {
-		return Response.json({ error: "Kurs nicht gefunden" }, { status: 404 });
-	}
-	if (!course.has_worklog_tracking || !course.daily_worklog_minutes) {
-		return Response.json({ error: "Worklogerfassung ist für diesen Kurs nicht aktiviert." }, { status: 400 });
-	}
+async function buildWorklogReport(db: D1Database, course: CourseRow) {
+	const target = course.daily_worklog_minutes!;
 
-	const { results: projectDayRows } = await env.DB.prepare("SELECT date FROM project_days WHERE course_id = ?1 ORDER BY date ASC")
+	const { results: projectDayRows } = await db.prepare("SELECT date FROM project_days WHERE course_id = ?1 ORDER BY date ASC")
 		.bind(course.id)
 		.all<{ date: string }>();
 	const todayLocal = localDateString(new Date(), course.timezone);
 	const pastProjectDays = projectDayRows.map((r) => r.date).filter((date) => date <= todayLocal);
 
-	const { results: participants } = await env.DB.prepare(
+	const { results: participants } = await db.prepare(
 		`SELECT p.id, p.name, p.group_id, g.name AS group_name
 		 FROM participants p LEFT JOIN groups g ON g.id = p.group_id
 		 WHERE p.course_id = ?1 ORDER BY p.name COLLATE NOCASE ASC`,
@@ -636,7 +684,7 @@ adminRouter.get("/courses/:id/worklog-report", requireAdmin, async (request: IRe
 		.bind(course.id)
 		.all<{ id: number; name: string; group_id: number | null; group_name: string | null }>();
 
-	const { results: entries } = await env.DB.prepare("SELECT participant_id, date, minutes FROM worklog_entries WHERE course_id = ?1")
+	const { results: entries } = await db.prepare("SELECT participant_id, date, minutes FROM worklog_entries WHERE course_id = ?1")
 		.bind(course.id)
 		.all<{ participant_id: number; date: string; minutes: number }>();
 
@@ -645,8 +693,6 @@ adminRouter.get("/courses/:id/worklog-report", requireAdmin, async (request: IRe
 		const key = `${entry.participant_id}|${entry.date}`;
 		minutesByParticipantDate.set(key, (minutesByParticipantDate.get(key) ?? 0) + entry.minutes);
 	}
-
-	const target = course.daily_worklog_minutes;
 
 	const participantReports = participants.map((p) => {
 		const days = pastProjectDays.map((date) => {
@@ -691,7 +737,7 @@ adminRouter.get("/courses/:id/worklog-report", requireAdmin, async (request: IRe
 	const totalPossibleDays = participants.length * pastProjectDays.length;
 	const totalCompleteDays = participantReports.reduce((sum, p) => sum + p.completeDays, 0);
 
-	return Response.json({
+	return {
 		course: {
 			dailyWorklogMinutes: target,
 			projectDaysCount: projectDayRows.length,
@@ -706,7 +752,19 @@ adminRouter.get("/courses/:id/worklog-report", requireAdmin, async (request: IRe
 		},
 		groups: [...groupMap.values()].sort((a, b) => a.groupName.localeCompare(b.groupName, "de")),
 		participants: participantReports,
-	});
+	};
+}
+
+adminRouter.get("/courses/:id/worklog-report", requireAdmin, async (request: IRequest, env: Env) => {
+	const course = await loadCourseOr404(env.DB, Number(request.params.id));
+	if (!course) {
+		return Response.json({ error: "Kurs nicht gefunden" }, { status: 404 });
+	}
+	if (!course.has_worklog_tracking || !course.daily_worklog_minutes) {
+		return Response.json({ error: "Worklogerfassung ist für diesen Kurs nicht aktiviert." }, { status: 400 });
+	}
+
+	return Response.json(await buildWorklogReport(env.DB, course));
 });
 
 // --- Bild-Repository (Header-Logos, gespeichert in R2) ---
