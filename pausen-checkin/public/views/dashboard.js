@@ -12,10 +12,11 @@ function budgetBarClass(usedMinutes, dailyBudget) {
 	return "";
 }
 
-function participantRow(participant, dailyBudget, hasBreakTracking) {
+function participantRow(participant, dailyBudget, hasBreakTracking, justReturned) {
+	const rowClass = justReturned ? ' class="just-returned"' : "";
 	if (!hasBreakTracking) {
 		return `
-			<tr>
+			<tr${rowClass}>
 				<td>${participant.name}</td>
 				<td><span class="status-badge ${participant.status}">${STATUS_LABELS[participant.status]}</span></td>
 			</tr>
@@ -23,7 +24,7 @@ function participantRow(participant, dailyBudget, hasBreakTracking) {
 	}
 	const percent = Math.min(100, (participant.usedMinutesToday / dailyBudget) * 100);
 	return `
-		<tr>
+		<tr${rowClass}>
 			<td>${participant.name}</td>
 			<td><span class="status-badge ${participant.status}">${STATUS_LABELS[participant.status]}</span></td>
 			<td>
@@ -136,6 +137,10 @@ export async function renderDashboard(root, dashboardToken) {
 	document.title = course.name;
 
 	const checkinUrl = `${await getBaseUrl()}/k/${course.checkinCode}`;
+	// Merkt sich den zuletzt gesehenen Status je Teilnehmer, um einen
+	// Wechsel "In der Pause" -> "Anwesend" zwischen zwei Abfragen zu
+	// erkennen (siehe justReturnedIds unten in loadLive).
+	const previousStatusById = new Map();
 	root.innerHTML = `
 		${renderBrandHeader(course)}
 		<nav class="top">
@@ -167,13 +172,24 @@ export async function renderDashboard(root, dashboardToken) {
 			? `Start: ${data.course.startDate} · Laufzeit: ${data.course.durationDays} Tag(e) · Tägl. Pausenbudget: ${data.course.dailyBreakBudgetMinutes} Min.`
 			: `Start: ${data.course.startDate} · Laufzeit: ${data.course.durationDays} Tag(e)`;
 
+		// Jemand, der zwischen der letzten und dieser Abfrage von "In der
+		// Pause" auf "Anwesend" gewechselt ist, hat gerade (angeblich)
+		// eingecheckt – dessen Zeile bekommt die Aufmerksamkeits-Animation.
+		const justReturnedIds = new Set();
+		data.participants.forEach((p) => {
+			if (previousStatusById.get(p.id) === "on_break" && p.status === "present") {
+				justReturnedIds.add(p.id);
+			}
+			previousStatusById.set(p.id, p.status);
+		});
+
 		const liveTable = root.querySelector("#live-table");
 		liveTable.innerHTML =
 			data.participants.length === 0
 				? '<p class="muted">Noch niemand eingecheckt.</p>'
 				: `<table>
 					<thead><tr><th>Name</th><th>Status</th>${data.course.hasBreakTracking ? "<th>Pausenbudget</th><th></th>" : ""}</tr></thead>
-					<tbody>${data.participants.map((p) => participantRow(p, data.course.dailyBreakBudgetMinutes, data.course.hasBreakTracking)).join("")}</tbody>
+					<tbody>${data.participants.map((p) => participantRow(p, data.course.dailyBreakBudgetMinutes, data.course.hasBreakTracking, justReturnedIds.has(p.id))).join("")}</tbody>
 				</table>`;
 		return true;
 	}

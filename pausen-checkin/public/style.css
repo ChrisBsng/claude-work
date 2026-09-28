@@ -535,3 +535,58 @@ nav.top a {
 .worklog-participant-row td {
 	font-weight: 400;
 }
+
+/* Fällt der Aufsicht auf: markiert kurz eine Zeile im Live-Dashboard,
+   wenn jemand gerade aus der Pause zurück eingecheckt hat – auch wenn
+   die Person tatsächlich noch gar nicht wieder da ist. */
+@keyframes just-returned-alert {
+	0%,
+	100% {
+		background-color: transparent;
+		transform: translateX(0);
+	}
+	10% {
+		background-color: rgba(220, 38, 38, 0.35);
+		transform: translateX(-6px);
+	}
+	20% {
+		background-color: transparent;
+		transform: translateX(6px);
+	}
+	30% {
+		background-color: rgba(220, 38, 38, 0.35);
+		transform: translateX(-6px);
+	}
+	40% {
+		background-color: transparent;
+		transform: translateX(6px);
+	}
+	50% {
+		background-color: rgba(220, 38, 38, 0.35);
+		transform: translateX(-4px);
+	}
+	60% {
+		background-color: transparent;
+		transform: translateX(4px);
+	}
+	70% {
+		background-color: rgba(220, 38, 38, 0.35);
+		transform: translateX(-2px);
+	}
+	80% {
+		background-color: transparent;
+		transform: translateX(2px);
+	}
+	90% {
+		background-color: rgba(220, 38, 38, 0.35);
+		transform: translateX(0);
+	}
+}
+
+tr.just-returned {
+	animation: just-returned-alert 2.4s ease-in-out;
+}
+
+tr.just-returned td:first-child {
+	font-weight: 700;
+}
