@@ -137,5 +137,28 @@ export class EdupageMcpAgent extends McpAgent<Env> {
 				};
 			},
 		);
+
+		this.server.tool(
+			"edupage_find_in_page",
+			"Escape-Hatch: lädt eine Edupage-Seite (GET) und sucht serverseitig nach einem Textausschnitt, statt " +
+				"die komplette (oft >1MB große) Seite zu übertragen. Liefert den Kontext um die ersten Treffer " +
+				"zurück. Nützlich, um im HTML/Inline-JS einer Dashboard-Seite zu finden, mit welchen Parametern " +
+				"das echte Edupage-Frontend eine bestimmte RPC-Funktion aufruft.",
+			{
+				...credentialsShape,
+				path: z.string().describe("Pfad auf dem Edupage-Host, z. B. /dashboard/eb.php?mode=timetable"),
+				find: z.string().min(1).describe('Zu suchender Textausschnitt, z. B. "curentttGetData"'),
+			},
+			async ({ path, find, ...credentials }: EdupageCredentials & { path: string; find: string }) => {
+				const session = await this.sessionFor(credentials.domain, credentials.username);
+				const result = await session.findInPage(credentials, path, find);
+				const text =
+					result.matches.length === 0
+						? `HTTP ${result.status} - kein Treffer für "${find}" gefunden.`
+						: `HTTP ${result.status} - ${result.matches.length} Treffer:\n\n` +
+							result.matches.map((m, i) => `--- Treffer ${i + 1} ---\n${m}`).join("\n\n");
+				return { content: [{ type: "text" as const, text }] };
+			},
+		);
 	}
 }

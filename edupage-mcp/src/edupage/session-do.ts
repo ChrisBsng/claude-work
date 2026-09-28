@@ -162,6 +162,38 @@ export class EdupageSessionDO extends DurableObject<Env> {
 		});
 		return { status: response.status, body: await response.text() };
 	}
+
+	/**
+	 * Escape-Hatch zum Erkunden großer Edupage-Seiten (Dashboard-Seiten sind
+	 * oft >1MB): sucht serverseitig nach einem Textausschnitt und liefert
+	 * die Umgebung der ersten Treffer zurück, statt die ganze (abgeschnittene)
+	 * Seite zu übertragen. Nützlich, um z. B. herauszufinden, mit welchen
+	 * genauen Parametern das echte Edupage-Frontend eine RPC-Funktion aufruft.
+	 */
+	async findInPage(
+		credentials: EdupageCredentials,
+		path: string,
+		needle: string,
+		contextChars = 400,
+		maxMatches = 5,
+	): Promise<{ status: number; matches: string[] }> {
+		const baseUrl = this.buildBaseUrl(credentials.domain);
+		const session = await this.ensureSession(credentials);
+		const response = await fetch(`${baseUrl}${path}`, {
+			headers: { Cookie: session.cookie },
+		});
+		const text = await response.text();
+
+		const matches: string[] = [];
+		let searchFrom = 0;
+		while (matches.length < maxMatches) {
+			const idx = text.indexOf(needle, searchFrom);
+			if (idx === -1) break;
+			matches.push(text.slice(Math.max(0, idx - contextChars), idx + needle.length + contextChars).replace(/\s+/g, " "));
+			searchFrom = idx + needle.length;
+		}
+		return { status: response.status, matches };
+	}
 }
 
 function extractCookieHeader(headers: Headers): string | null {
