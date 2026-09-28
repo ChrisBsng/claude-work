@@ -1,0 +1,1 @@
+ALTER TABLE courses ADD COLUMN allow_overtime_credit INTEGER NOT NULL DEFAULT 0;

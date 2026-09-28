@@ -3,6 +3,7 @@ import { getBaseUrl } from "/baseUrl.js";
 
 const TOKEN_KEY = "pausenCheckin.adminToken";
 const SCHULSTUNDE_MINUTES = 45;
+const OVERTIME_WARNING_TOLERANCE_MINUTES = 5;
 
 function courseDateRange(startDate, durationDays) {
 	const [y, m, d] = startDate.split("-").map(Number);
@@ -520,6 +521,15 @@ async function renderWorklogSettingsPanel(container, token, course, { handleAuth
 			<label style="margin-top: 16px;">Projekttage (anklicken zum Auswählen/Abwählen)</label>
 			<div id="worklog-calendar" class="link-row"></div>
 			<p class="muted" id="worklog-total" style="margin-top: 10px;"></p>
+
+			<div class="toggle-row" style="margin-top: 16px;">
+				<input type="checkbox" id="worklog-allow-overtime" ${course.allowOvertimeCredit ? "checked" : ""} />
+				<label for="worklog-allow-overtime">Erlaube Mehrarbeit/Überstunden auf die gesamte Projektzeit anzurechnen</label>
+			</div>
+			<p class="muted">
+				Ohne dieses Häkchen verfallen Minuten, die an einem Tag mehr als ${OVERTIME_WARNING_TOLERANCE_MINUTES} Minuten über dem
+				Tagesziel liegen – Teilnehmende erhalten beim Eintragen eine Meldung und müssen die Zeit anpassen.
+			</p>
 		</div>
 		<div id="worklog-error"></div>
 		<button type="button" id="worklog-save" style="margin-top: 16px;">Speichern</button>
@@ -579,11 +589,13 @@ async function renderWorklogSettingsPanel(container, token, course, { handleAuth
 		const errorBox = container.querySelector("#worklog-error");
 		errorBox.textContent = "";
 		const enabled = container.querySelector("#worklog-enabled").checked;
+		const allowOvertimeCredit = container.querySelector("#worklog-allow-overtime").checked;
 
 		try {
 			await api.updateCourse(token, course.id, {
 				hasWorklogTracking: enabled,
 				dailyWorklogMinutes: enabled ? Number(schulstundenSelect.value) : undefined,
+				allowOvertimeCredit,
 			});
 			if (enabled) {
 				await api.setProjectDays(token, course.id, [...selectedDates]);

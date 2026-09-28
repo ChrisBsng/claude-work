@@ -33,10 +33,11 @@ interface CourseRow {
 	has_break_tracking: number;
 	has_worklog_tracking: number;
 	daily_worklog_minutes: number | null;
+	allow_overtime_credit: number;
 }
 
 const COURSE_COLUMNS =
-	"id, name, start_date, duration_days, daily_break_budget_minutes, timezone, checkin_code, dashboard_token, is_active, created_at, header_left_image_id, header_right_image_id, has_break_tracking, has_worklog_tracking, daily_worklog_minutes";
+	"id, name, start_date, duration_days, daily_break_budget_minutes, timezone, checkin_code, dashboard_token, is_active, created_at, header_left_image_id, header_right_image_id, has_break_tracking, has_worklog_tracking, daily_worklog_minutes, allow_overtime_credit";
 
 async function loadDefaultHeaderLeftImageId(db: D1Database): Promise<string | null> {
 	const setting = await db
@@ -62,6 +63,7 @@ function serializeCourse(course: CourseRow, defaultHeaderLeftImageId: string | n
 		hasBreakTracking: Boolean(course.has_break_tracking),
 		hasWorklogTracking: Boolean(course.has_worklog_tracking),
 		dailyWorklogMinutes: course.daily_worklog_minutes,
+		allowOvertimeCredit: Boolean(course.allow_overtime_credit),
 	};
 }
 
@@ -99,6 +101,7 @@ adminRouter.post("/courses", requireAdmin, async (request: IRequest, env: Env) =
 				hasBreakTracking?: boolean;
 				hasWorklogTracking?: boolean;
 				dailyWorklogMinutes?: number;
+				allowOvertimeCredit?: boolean;
 		  }
 		| null;
 
@@ -108,6 +111,7 @@ adminRouter.post("/courses", requireAdmin, async (request: IRequest, env: Env) =
 	const hasBreakTracking = body?.hasBreakTracking ?? true;
 	const hasWorklogTracking = body?.hasWorklogTracking ?? false;
 	const dailyWorklogMinutes = body?.dailyWorklogMinutes !== undefined ? Number(body.dailyWorklogMinutes) : null;
+	const allowOvertimeCredit = body?.allowOvertimeCredit ?? false;
 
 	if (
 		!name ||
@@ -135,8 +139,8 @@ adminRouter.post("/courses", requireAdmin, async (request: IRequest, env: Env) =
 	const dashboardToken = randomToken(DASHBOARD_TOKEN_BYTES);
 
 	const course = await env.DB.prepare(
-		`INSERT INTO courses (name, duration_days, daily_break_budget_minutes, checkin_code, dashboard_token, has_break_tracking, has_worklog_tracking, daily_worklog_minutes)
-		 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+		`INSERT INTO courses (name, duration_days, daily_break_budget_minutes, checkin_code, dashboard_token, has_break_tracking, has_worklog_tracking, daily_worklog_minutes, allow_overtime_credit)
+		 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
 		 RETURNING ${COURSE_COLUMNS}`,
 	)
 		.bind(
@@ -148,6 +152,7 @@ adminRouter.post("/courses", requireAdmin, async (request: IRequest, env: Env) =
 			hasBreakTracking ? 1 : 0,
 			hasWorklogTracking ? 1 : 0,
 			hasWorklogTracking ? dailyWorklogMinutes : null,
+			allowOvertimeCredit ? 1 : 0,
 		)
 		.first<CourseRow>();
 
@@ -171,6 +176,7 @@ adminRouter.patch("/courses/:id", requireAdmin, async (request: IRequest, env: E
 				hasBreakTracking?: boolean;
 				hasWorklogTracking?: boolean;
 				dailyWorklogMinutes?: number;
+				allowOvertimeCredit?: boolean;
 		  }
 		| null;
 	if (!body) {
@@ -185,6 +191,8 @@ adminRouter.patch("/courses/:id", requireAdmin, async (request: IRequest, env: E
 	const hasWorklogTracking = body.hasWorklogTracking !== undefined ? body.hasWorklogTracking : Boolean(course.has_worklog_tracking);
 	const dailyWorklogMinutes =
 		body.dailyWorklogMinutes !== undefined ? Number(body.dailyWorklogMinutes) : course.daily_worklog_minutes;
+	const allowOvertimeCredit =
+		body.allowOvertimeCredit !== undefined ? body.allowOvertimeCredit : Boolean(course.allow_overtime_credit);
 
 	if (!name || !Number.isInteger(durationDays) || durationDays <= 0 || durationDays > MAX_DURATION_DAYS) {
 		return Response.json({ error: `Name und Laufzeit (1–${MAX_DURATION_DAYS} Tage) sind erforderlich.` }, { status: 400 });
@@ -200,8 +208,8 @@ adminRouter.patch("/courses/:id", requireAdmin, async (request: IRequest, env: E
 	}
 
 	const updated = await env.DB.prepare(
-		`UPDATE courses SET name = ?1, duration_days = ?2, daily_break_budget_minutes = ?3, has_break_tracking = ?4, has_worklog_tracking = ?5, daily_worklog_minutes = ?6
-		 WHERE id = ?7 RETURNING ${COURSE_COLUMNS}`,
+		`UPDATE courses SET name = ?1, duration_days = ?2, daily_break_budget_minutes = ?3, has_break_tracking = ?4, has_worklog_tracking = ?5, daily_worklog_minutes = ?6, allow_overtime_credit = ?7
+		 WHERE id = ?8 RETURNING ${COURSE_COLUMNS}`,
 	)
 		.bind(
 			name,
@@ -210,6 +218,7 @@ adminRouter.patch("/courses/:id", requireAdmin, async (request: IRequest, env: E
 			hasBreakTracking ? 1 : 0,
 			hasWorklogTracking ? 1 : 0,
 			hasWorklogTracking ? dailyWorklogMinutes : null,
+			allowOvertimeCredit ? 1 : 0,
 			course.id,
 		)
 		.first<CourseRow>();
@@ -690,13 +699,17 @@ async function buildWorklogReport(db: D1Database, course: CourseRow) {
 	}
 
 	const percentOf = (logged: number, expected: number) => (expected > 0 ? Math.round((logged / expected) * 1000) / 10 : null);
+	const allowOvertime = Boolean(course.allow_overtime_credit);
 
 	const participantReports = participants.map((p) => {
 		const days = pastProjectDays.map((date) => {
 			const minutes = minutesByParticipantDate.get(`${p.id}|${date}`) ?? 0;
 			return { date, minutes, isComplete: minutes >= target };
 		});
-		const totalMinutes = days.reduce((sum, d) => sum + d.minutes, 0);
+		// Ohne aktivierte Mehrarbeits-Anrechnung zählen Minuten über dem Tagesziel
+		// nicht zur Gesamtzeit (sie "verfallen"); die Tagesansicht zeigt weiterhin
+		// die tatsächlich erfasste Zeit.
+		const totalMinutes = days.reduce((sum, d) => sum + (allowOvertime ? d.minutes : Math.min(d.minutes, target)), 0);
 		const completeDays = days.filter((d) => d.isComplete).length;
 		const expectedMinutes = days.length * target;
 		return {

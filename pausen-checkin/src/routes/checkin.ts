@@ -5,7 +5,7 @@ import { hashParticipantPassword, randomToken, verifyParticipantPassword } from 
 import { resolveBaseUrl } from "../baseUrl";
 import { resolveHeaderImageIds } from "../images";
 import { renderQrCodeSvg } from "../qrcode";
-import { isValidDateString } from "../worklog";
+import { isValidDateString, OVERTIME_WARNING_TOLERANCE_MINUTES } from "../worklog";
 
 const PARTICIPANT_TOKEN_BYTES = 20;
 const MIN_PASSWORD_LENGTH = 4;
@@ -21,6 +21,7 @@ interface CourseRow {
 	has_break_tracking: number;
 	has_worklog_tracking: number;
 	daily_worklog_minutes: number | null;
+	allow_overtime_credit: number;
 }
 
 type ParticipantStatus = "present" | "on_break" | "unknown";
@@ -37,7 +38,7 @@ async function getActiveCourseByCheckinCode(db: D1Database, checkinCode: string)
 	const course = await db
 		.prepare(
 			`SELECT id, name, daily_break_budget_minutes, timezone, is_active, header_left_image_id, header_right_image_id,
-			 has_break_tracking, has_worklog_tracking, daily_worklog_minutes
+			 has_break_tracking, has_worklog_tracking, daily_worklog_minutes, allow_overtime_credit
 			 FROM courses WHERE checkin_code = ?1`,
 		)
 		.bind(checkinCode)
@@ -100,6 +101,7 @@ checkinRouter.get("/:checkinCode", async (request: IRequest, env: Env) => {
 			hasBreakTracking: Boolean(course.has_break_tracking),
 			hasWorklogTracking: Boolean(course.has_worklog_tracking),
 			dailyWorklogMinutes: course.daily_worklog_minutes,
+			allowOvertimeCredit: Boolean(course.allow_overtime_credit),
 		},
 	});
 });
@@ -360,6 +362,26 @@ checkinRouter.get("/:checkinCode/worklog/tasks", async (request: IRequest, env: 
 	return Response.json({ tasks: results.map((r) => r.task) });
 });
 
+async function getDayTotalMinutes(db: D1Database, participantId: number, date: string): Promise<number> {
+	const row = await db
+		.prepare("SELECT COALESCE(SUM(minutes), 0) AS total FROM worklog_entries WHERE participant_id = ?1 AND date = ?2")
+		.bind(participantId, date)
+		.first<{ total: number }>();
+	return row?.total ?? 0;
+}
+
+function overtimeErrorResponse(projectedMinutes: number, target: number): Response {
+	return Response.json(
+		{
+			error:
+				`Mit dieser Zeit läge dein Tag bei ${projectedMinutes} Minuten und würde dein Tagesziel von ${target} Minuten ` +
+				`um mehr als ${OVERTIME_WARNING_TOLERANCE_MINUTES} Minuten überschreiten. In diesem Kurs zählen Überstunden nicht zur ` +
+				`Gesamtzeit – bitte reduziere die Zeit oder trage den Rest an einem anderen Tag ein.`,
+		},
+		{ status: 400 },
+	);
+}
+
 async function loadWorklogDay(db: D1Database, participantId: number, date: string, targetMinutes: number) {
 	const { results: entries } = await db
 		.prepare("SELECT id, task, minutes FROM worklog_entries WHERE participant_id = ?1 AND date = ?2 ORDER BY created_at ASC")
@@ -413,6 +435,15 @@ checkinRouter.post("/:checkinCode/worklog/:date", async (request: IRequest, env:
 		return Response.json({ error: "Task und eine Zeit (Minuten, ≥ 0) sind erforderlich." }, { status: 400 });
 	}
 
+	if (!course.allow_overtime_credit) {
+		const existingTotal = await getDayTotalMinutes(env.DB, auth.participant.id, date);
+		const projectedTotal = existingTotal + minutes;
+		const target = course.daily_worklog_minutes!;
+		if (projectedTotal > target + OVERTIME_WARNING_TOLERANCE_MINUTES) {
+			return overtimeErrorResponse(projectedTotal, target);
+		}
+	}
+
 	await env.DB.prepare("INSERT INTO worklog_entries (participant_id, course_id, date, task, minutes) VALUES (?1, ?2, ?3, ?4, ?5)")
 		.bind(auth.participant.id, course.id, date, task, minutes)
 		.run();
@@ -432,9 +463,9 @@ checkinRouter.patch("/:checkinCode/worklog/:date/:entryId", async (request: IReq
 	if ("error" in auth) return auth.error;
 
 	const entryId = Number(request.params.entryId);
-	const owned = await env.DB.prepare("SELECT id FROM worklog_entries WHERE id = ?1 AND participant_id = ?2")
+	const owned = await env.DB.prepare("SELECT id, date, minutes FROM worklog_entries WHERE id = ?1 AND participant_id = ?2")
 		.bind(entryId, auth.participant.id)
-		.first();
+		.first<{ id: number; date: string; minutes: number }>();
 	if (!owned) {
 		return Response.json({ error: "Eintrag nicht gefunden" }, { status: 404 });
 	}
@@ -444,6 +475,15 @@ checkinRouter.patch("/:checkinCode/worklog/:date/:entryId", async (request: IReq
 	const minutes = body?.minutes !== undefined ? Number(body.minutes) : undefined;
 	if (minutes !== undefined && (!Number.isInteger(minutes) || minutes < 0)) {
 		return Response.json({ error: "Zeit muss eine ganze Zahl ≥ 0 sein." }, { status: 400 });
+	}
+
+	if (!course.allow_overtime_credit && minutes !== undefined) {
+		const dayTotal = await getDayTotalMinutes(env.DB, auth.participant.id, owned.date);
+		const projectedTotal = dayTotal - owned.minutes + minutes;
+		const target = course.daily_worklog_minutes!;
+		if (projectedTotal > target + OVERTIME_WARNING_TOLERANCE_MINUTES) {
+			return overtimeErrorResponse(projectedTotal, target);
+		}
 	}
 
 	await env.DB.prepare(

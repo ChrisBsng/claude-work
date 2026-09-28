@@ -2,6 +2,10 @@
 export const SCHULSTUNDE_MINUTES = 45;
 export const MAX_SCHULSTUNDEN = 12;
 
+// Toleranz, um wie viele Minuten ein Tag das Tagesziel überschreiten darf,
+// bevor ein Eintrag (ohne aktivierte Mehrarbeits-Anrechnung) abgelehnt wird.
+export const OVERTIME_WARNING_TOLERANCE_MINUTES = 5;
+
 export function isValidDailyWorklogMinutes(minutes: number): boolean {
 	return (
 		Number.isInteger(minutes) &&
