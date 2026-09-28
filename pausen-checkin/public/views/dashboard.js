@@ -11,7 +11,15 @@ function budgetBarClass(usedMinutes, dailyBudget) {
 	return "";
 }
 
-function participantRow(participant, dailyBudget) {
+function participantRow(participant, dailyBudget, hasBreakTracking) {
+	if (!hasBreakTracking) {
+		return `
+			<tr>
+				<td>${participant.name}</td>
+				<td><span class="status-badge ${participant.status}">${STATUS_LABELS[participant.status]}</span></td>
+			</tr>
+		`;
+	}
 	const percent = Math.min(100, (participant.usedMinutesToday / dailyBudget) * 100);
 	return `
 		<tr>
@@ -153,21 +161,24 @@ export async function renderDashboard(root, dashboardToken) {
 		}
 
 		root.querySelector("#course-name").textContent = data.course.name;
-		root.querySelector("#course-meta").textContent =
-			`Start: ${data.course.startDate} · Laufzeit: ${data.course.durationDays} Tag(e) · Tägl. Pausenbudget: ${data.course.dailyBreakBudgetMinutes} Min.`;
+		root.querySelector("#course-meta").textContent = data.course.hasBreakTracking
+			? `Start: ${data.course.startDate} · Laufzeit: ${data.course.durationDays} Tag(e) · Tägl. Pausenbudget: ${data.course.dailyBreakBudgetMinutes} Min.`
+			: `Start: ${data.course.startDate} · Laufzeit: ${data.course.durationDays} Tag(e)`;
 
 		const liveTable = root.querySelector("#live-table");
 		liveTable.innerHTML =
 			data.participants.length === 0
 				? '<p class="muted">Noch niemand eingecheckt.</p>'
 				: `<table>
-					<thead><tr><th>Name</th><th>Status</th><th>Pausenbudget</th><th></th></tr></thead>
-					<tbody>${data.participants.map((p) => participantRow(p, data.course.dailyBreakBudgetMinutes)).join("")}</tbody>
+					<thead><tr><th>Name</th><th>Status</th>${data.course.hasBreakTracking ? "<th>Pausenbudget</th><th></th>" : ""}</tr></thead>
+					<tbody>${data.participants.map((p) => participantRow(p, data.course.dailyBreakBudgetMinutes, data.course.hasBreakTracking)).join("")}</tbody>
 				</table>`;
 		return true;
 	}
 
 	await loadLive();
-	await renderHistorySection(root.querySelector("#history-section"), dashboardToken, course);
+	if (course.hasBreakTracking) {
+		await renderHistorySection(root.querySelector("#history-section"), dashboardToken, course);
+	}
 	setInterval(loadLive, POLL_INTERVAL_MS);
 }

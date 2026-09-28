@@ -14,41 +14,6 @@ function clearToken() {
 	sessionStorage.removeItem(TOKEN_KEY);
 }
 
-export function renderAdmin(root) {
-	const token = getToken();
-	if (token) {
-		renderCourses(root, token);
-	} else {
-		renderLogin(root);
-	}
-}
-
-function renderLogin(root, message) {
-	root.innerHTML = `
-		<h1>Admin-Bereich</h1>
-		<div class="card">
-			<form id="login-form">
-				<label for="password">Passwort</label>
-				<input type="password" id="password" name="password" required autofocus />
-				${message ? `<p class="error">${message}</p>` : ""}
-				<button type="submit">Anmelden</button>
-			</form>
-		</div>
-	`;
-
-	root.querySelector("#login-form").addEventListener("submit", async (event) => {
-		event.preventDefault();
-		const password = root.querySelector("#password").value;
-		try {
-			const { token } = await api.adminLogin(password);
-			setToken(token);
-			renderCourses(root, token);
-		} catch (error) {
-			renderLogin(root, error.message);
-		}
-	});
-}
-
 function courseUrl(path) {
 	return `${window.location.origin}${path}`;
 }
@@ -64,56 +29,451 @@ async function copyToClipboard(text, button) {
 	}
 }
 
-async function downloadExport(token, course) {
-	const blob = await api.exportCourseXlsxBlob(token, course.id);
-	const url = URL.createObjectURL(blob);
-	const link = document.createElement("a");
-	link.href = url;
-	link.download = `${course.name.replace(/[^\p{L}\p{N}\- ]+/gu, "").trim() || "kurs"}.xlsx`;
-	document.body.appendChild(link);
-	link.click();
-	link.remove();
-	URL.revokeObjectURL(url);
-}
-
 function formatMinutes(minutes) {
 	const h = Math.floor(minutes / 60);
 	const m = minutes % 60;
 	return h > 0 ? `${h} h ${m} min` : `${m} min`;
 }
 
-async function renderReportPanel(container, token, course) {
-	container.innerHTML = `<p class="muted">Lädt Statistik…</p>`;
-	try {
-		const stats = await api.getCourseStats(token, course.id);
-		container.innerHTML = `
-			<p class="muted">
-				${stats.participantCount} Teilnehmer(in) · Gesamt-Pausenzeit bisher: ${formatMinutes(stats.totalBreakMinutes)}
-			</p>
-			<button type="button" id="export-btn">Als Excel (.xlsx) exportieren</button>
-		`;
-		container.querySelector("#export-btn").addEventListener("click", async (event) => {
-			const button = event.target;
-			button.disabled = true;
-			button.textContent = "Erzeuge Datei…";
-			try {
-				await downloadExport(token, course);
-			} finally {
-				button.disabled = false;
-				button.textContent = "Als Excel (.xlsx) exportieren";
-			}
-		});
-	} catch (error) {
-		container.innerHTML = `<p class="error">${error.message}</p>`;
+export function renderAdmin(root) {
+	root.classList.add("admin-app");
+	const token = getToken();
+	if (token) {
+		renderAdminShell(root, token);
+	} else {
+		renderLogin(root);
 	}
+}
+
+function renderLogin(root, message) {
+	root.innerHTML = `
+		<div style="max-width: 960px; margin: 0 auto; padding: 24px 16px;">
+			<h1>Admin-Bereich</h1>
+			<div class="card">
+				<form id="login-form">
+					<label for="password">Passwort</label>
+					<input type="password" id="password" name="password" required autofocus />
+					${message ? `<p class="error">${message}</p>` : ""}
+					<button type="submit">Anmelden</button>
+				</form>
+			</div>
+		</div>
+	`;
+
+	root.querySelector("#login-form").addEventListener("submit", async (event) => {
+		event.preventDefault();
+		const password = root.querySelector("#password").value;
+		try {
+			const { token } = await api.adminLogin(password);
+			setToken(token);
+			renderAdminShell(root, token);
+		} catch (error) {
+			renderLogin(root, error.message);
+		}
+	});
+}
+
+// --- Shell: Sidebar + Hauptbereich -----------------------------------
+
+async function renderAdminShell(root, token) {
+	root.innerHTML = `
+		<div class="admin-layout">
+			<nav class="admin-sidebar">
+				<div class="admin-sidebar-title">Admin-Bereich</div>
+				<div id="sidebar-tree"></div>
+				<button type="button" class="sidebar-item" id="sidebar-images">Bilder</button>
+				<button type="button" class="sidebar-item" id="sidebar-logout" style="margin-top: 20px; color: var(--color-danger);">Abmelden</button>
+			</nav>
+			<main class="admin-main" id="admin-main"></main>
+		</div>
+	`;
+
+	root.querySelector("#sidebar-logout").addEventListener("click", () => {
+		clearToken();
+		renderLogin(root);
+	});
+
+	const state = { view: "courses" };
+	let courses = [];
+
+	function handleAuthError(error) {
+		if (error.status === 401) {
+			clearToken();
+			renderLogin(root, "Sitzung abgelaufen, bitte erneut anmelden.");
+			return true;
+		}
+		return false;
+	}
+
+	async function refreshCourses() {
+		try {
+			({ courses } = await api.adminListCourses(token));
+		} catch (error) {
+			if (handleAuthError(error)) return;
+			throw error;
+		}
+		renderSidebarTree();
+	}
+
+	function navigate(next) {
+		Object.assign(state, next);
+		renderSidebarTree();
+		renderMain();
+	}
+
+	function renderSidebarTree() {
+		const container = root.querySelector("#sidebar-tree");
+		const isCoursesRoot = state.view === "courses";
+		container.innerHTML = `
+			<button type="button" class="sidebar-item ${isCoursesRoot ? "active" : ""}" id="sidebar-courses-root">Kurse</button>
+			<div id="sidebar-course-list"></div>
+		`;
+		container.querySelector("#sidebar-courses-root").addEventListener("click", () => navigate({ view: "courses" }));
+
+		const list = container.querySelector("#sidebar-course-list");
+		courses.forEach((course) => {
+			const isActive = state.view === "course" && state.courseId === course.id;
+			const button = document.createElement("button");
+			button.type = "button";
+			button.className = `sidebar-subitem ${isActive ? "active" : ""}`;
+			button.textContent = course.name;
+			button.title = course.name;
+			button.addEventListener("click", () => navigate({ view: "course", courseId: course.id, tab: "overview" }));
+			list.appendChild(button);
+		});
+
+		const addNew = document.createElement("button");
+		addNew.type = "button";
+		addNew.className = "sidebar-subitem add-new";
+		addNew.textContent = "+ Neuer Kurs";
+		addNew.addEventListener("click", () => navigate({ view: "courses" }));
+		list.appendChild(addNew);
+
+		root.querySelector("#sidebar-images").className = `sidebar-item ${state.view === "images" ? "active" : ""}`;
+	}
+
+	root.querySelector("#sidebar-images").addEventListener("click", () => navigate({ view: "images" }));
+
+	async function renderMain() {
+		const main = root.querySelector("#admin-main");
+		if (state.view === "courses") {
+			await renderCoursesOverview(main, token, { courses, refreshCourses, handleAuthError, navigate });
+		} else if (state.view === "images") {
+			await renderImagesPage(main, token);
+		} else if (state.view === "course") {
+			await renderCourseDetail(main, token, state, { handleAuthError, refreshCourses, navigate });
+		}
+	}
+
+	await refreshCourses();
+	await renderMain();
+}
+
+// --- "Kurse"-Übersicht: Tabelle + Bulk-Aktionen + Neuer Kurs ----------
+
+function courseListRow(course, onSelectionChange, onOpen) {
+	const tr = document.createElement("tr");
+	tr.innerHTML = `
+		<td><input type="checkbox" class="row-select" /></td>
+		<td><a href="#" class="course-link">${course.name}</a></td>
+		<td>${course.startDate}</td>
+		<td>${course.durationDays} Tag(e)</td>
+		<td>${course.hasBreakTracking ? `${course.dailyBreakBudgetMinutes} Min./Tag` : "–"}</td>
+	`;
+	tr.querySelector(".row-select").addEventListener("change", onSelectionChange);
+	tr.querySelector(".course-link").addEventListener("click", (event) => {
+		event.preventDefault();
+		onOpen();
+	});
+	return tr;
+}
+
+async function renderCoursesOverview(container, token, { refreshCourses, handleAuthError, navigate }) {
+	container.innerHTML = `
+		<h1>Kurse</h1>
+
+		<div class="card">
+			<h2>Neuen Kurs anlegen</h2>
+			<form id="course-form">
+				<label for="name">Name</label>
+				<input type="text" id="name" required />
+
+				<label for="durationDays">Laufzeit (Tage)</label>
+				<input type="number" id="durationDays" min="1" step="1" required />
+
+				<label for="dailyBreakBudgetMinutes">Tägliches Pausenbudget (Minuten)</label>
+				<input type="number" id="dailyBreakBudgetMinutes" min="1" step="1" required value="30" />
+
+				<div class="toggle-row">
+					<input type="checkbox" id="hasBreakTracking" checked />
+					<label for="hasBreakTracking">Pausenzeiterfassung</label>
+				</div>
+				<div class="toggle-row">
+					<input type="checkbox" id="hasWorklogTracking" />
+					<label for="hasWorklogTracking">Worklogerfassung (folgt in einem späteren Schritt)</label>
+				</div>
+
+				<div id="course-form-error"></div>
+				<button type="submit">Kurs anlegen</button>
+			</form>
+		</div>
+
+		<h2>Bestehende Kurse</h2>
+		<div class="link-row" id="bulk-bar" hidden>
+			<strong><span id="selected-count">0</span> ausgewählt</strong>
+			<button type="button" id="bulk-delete" class="secondary" style="color: var(--color-danger); border-color: var(--color-danger);">
+				Endgültig löschen
+			</button>
+		</div>
+		<div id="course-list"><p class="muted">Lädt…</p></div>
+	`;
+
+	container.querySelector("#hasBreakTracking").addEventListener("change", (event) => {
+		container.querySelector("#dailyBreakBudgetMinutes").disabled = !event.target.checked;
+	});
+
+	container.querySelector("#course-form").addEventListener("submit", async (event) => {
+		event.preventDefault();
+		const errorBox = container.querySelector("#course-form-error");
+		errorBox.textContent = "";
+		const name = container.querySelector("#name").value.trim();
+		const durationDays = Number(container.querySelector("#durationDays").value);
+		const dailyBreakBudgetMinutes = Number(container.querySelector("#dailyBreakBudgetMinutes").value);
+		const hasBreakTracking = container.querySelector("#hasBreakTracking").checked;
+		const hasWorklogTracking = container.querySelector("#hasWorklogTracking").checked;
+
+		try {
+			await api.adminCreateCourse(token, { name, durationDays, dailyBreakBudgetMinutes, hasBreakTracking, hasWorklogTracking });
+			event.target.reset();
+			await refreshCourses();
+			await loadCourseTable();
+		} catch (error) {
+			if (handleAuthError(error)) return;
+			errorBox.textContent = error.message;
+			errorBox.className = "error";
+		}
+	});
+
+	function updateBulkBar() {
+		const checked = container.querySelectorAll(".row-select:checked");
+		const bar = container.querySelector("#bulk-bar");
+		container.querySelector("#selected-count").textContent = checked.length;
+		bar.hidden = checked.length === 0;
+	}
+
+	container.querySelector("#bulk-delete").addEventListener("click", async () => {
+		const rows = [...container.querySelectorAll("#course-table tbody tr")];
+		const selectedIds = rows.filter((row) => row.querySelector(".row-select").checked).map((row) => Number(row.dataset.courseId));
+		if (selectedIds.length === 0) return;
+		const confirmed = window.confirm(
+			`${selectedIds.length} Kurs(e) inkl. aller Teilnehmerdaten endgültig löschen? Das kann nicht rückgängig gemacht werden.`,
+		);
+		if (!confirmed) return;
+
+		try {
+			await api.bulkDeleteCourses(token, selectedIds);
+			await refreshCourses();
+			await loadCourseTable();
+		} catch (error) {
+			if (handleAuthError(error)) return;
+			window.alert(error.message);
+		}
+	});
+
+	async function loadCourseTable() {
+		const list = container.querySelector("#course-list");
+		try {
+			const { courses } = await api.adminListCourses(token);
+			if (courses.length === 0) {
+				list.innerHTML = '<p class="muted">Noch keine Kurse angelegt.</p>';
+				container.querySelector("#bulk-bar").hidden = true;
+				return;
+			}
+
+			const table = document.createElement("table");
+			table.id = "course-table";
+			table.innerHTML = `
+				<thead>
+					<tr>
+						<th><input type="checkbox" id="select-all" /></th>
+						<th>Name</th>
+						<th>Start</th>
+						<th>Laufzeit</th>
+						<th>Pausenbudget</th>
+					</tr>
+				</thead>
+				<tbody></tbody>
+			`;
+			const tbody = table.querySelector("tbody");
+			courses.forEach((course) => {
+				const row = courseListRow(course, updateBulkBar, () => navigate({ view: "course", courseId: course.id, tab: "overview" }));
+				row.dataset.courseId = course.id;
+				tbody.appendChild(row);
+			});
+
+			list.innerHTML = "";
+			list.appendChild(table);
+
+			table.querySelector("#select-all").addEventListener("change", (event) => {
+				tbody.querySelectorAll(".row-select").forEach((checkbox) => (checkbox.checked = event.target.checked));
+				updateBulkBar();
+			});
+			updateBulkBar();
+		} catch (error) {
+			if (handleAuthError(error)) return;
+			list.innerHTML = `<p class="error">${error.message}</p>`;
+		}
+	}
+
+	await loadCourseTable();
+}
+
+// --- Kurs-Detailansicht mit Tabs ---------------------------------------
+
+const COURSE_TABS = [
+	{ id: "overview", label: "Übersicht" },
+	{ id: "participants", label: "Teilnehmer" },
+	{ id: "groups", label: "Gruppen" },
+	{ id: "report", label: "Report / Statistik" },
+];
+
+async function renderCourseDetail(container, token, state, { handleAuthError, refreshCourses, navigate }) {
+	let course;
+	try {
+		const { courses } = await api.adminListCourses(token);
+		course = courses.find((c) => c.id === state.courseId);
+	} catch (error) {
+		if (handleAuthError(error)) return;
+		container.innerHTML = `<p class="error">${error.message}</p>`;
+		return;
+	}
+
+	if (!course) {
+		container.innerHTML = `<p class="error">Kurs nicht gefunden.</p>`;
+		return;
+	}
+
+	const activeTab = state.tab ?? "overview";
+
+	container.innerHTML = `
+		<h1>${course.name}</h1>
+		<div class="tab-bar">
+			${COURSE_TABS.map((tab) => `<button type="button" class="tab-button ${tab.id === activeTab ? "active" : ""}" data-tab="${tab.id}">${tab.label}</button>`).join("")}
+		</div>
+		<div id="tab-content"></div>
+	`;
+
+	container.querySelectorAll(".tab-button").forEach((button) => {
+		button.addEventListener("click", () => navigate({ view: "course", courseId: course.id, tab: button.dataset.tab }));
+	});
+
+	const tabContent = container.querySelector("#tab-content");
+	const refreshThisCourse = async () => {
+		await refreshCourses();
+		await renderCourseDetail(container, token, state, { handleAuthError, refreshCourses, navigate });
+	};
+
+	if (activeTab === "overview") {
+		await renderCourseOverviewTab(tabContent, token, course, { handleAuthError, refreshThisCourse });
+	} else if (activeTab === "participants") {
+		await renderCourseParticipantsTab(tabContent, token, course, { handleAuthError });
+	} else if (activeTab === "groups") {
+		await renderCourseGroupsTab(tabContent, token, course, { handleAuthError });
+	} else if (activeTab === "report") {
+		await renderCourseReportTab(tabContent, token, course, { handleAuthError });
+	}
+}
+
+async function renderCourseOverviewTab(container, token, course, { handleAuthError, refreshThisCourse }) {
+	const dashboardUrl = courseUrl(`/d/${course.dashboardToken}`);
+	const checkinUrl = courseUrl(`/k/${course.checkinCode}`);
+
+	container.innerHTML = `
+		<div class="card">
+			<h2>Einstellungen</h2>
+			<form id="settings-form">
+				<label for="name">Name</label>
+				<input type="text" id="name" value="${course.name}" required />
+
+				<label for="durationDays">Laufzeit (Tage)</label>
+				<input type="number" id="durationDays" min="1" step="1" value="${course.durationDays}" required />
+
+				<div class="toggle-row">
+					<input type="checkbox" id="hasBreakTracking" ${course.hasBreakTracking ? "checked" : ""} />
+					<label for="hasBreakTracking">Pausenzeiterfassung</label>
+				</div>
+				<div id="budget-field" ${course.hasBreakTracking ? "" : "hidden"}>
+					<label for="dailyBreakBudgetMinutes">Tägliches Pausenbudget (Minuten)</label>
+					<input type="number" id="dailyBreakBudgetMinutes" min="1" step="1" value="${course.dailyBreakBudgetMinutes}" />
+				</div>
+				<div class="toggle-row">
+					<input type="checkbox" id="hasWorklogTracking" ${course.hasWorklogTracking ? "checked" : ""} />
+					<label for="hasWorklogTracking">Worklogerfassung (folgt in einem späteren Schritt)</label>
+				</div>
+
+				<div id="settings-error"></div>
+				<button type="submit">Speichern</button>
+			</form>
+		</div>
+
+		<div class="card">
+			<h2>Links</h2>
+			<div class="link-row">
+				<strong>Dashboard:</strong>
+				<code>${dashboardUrl}</code>
+				<button type="button" class="secondary" data-copy="${dashboardUrl}">Kopieren</button>
+				<a href="${dashboardUrl}" target="_blank" rel="noopener">Öffnen</a>
+			</div>
+			<div class="link-row">
+				<strong>Check-in:</strong>
+				<code>${checkinUrl}</code>
+				<button type="button" class="secondary" data-copy="${checkinUrl}">Kopieren</button>
+				<a href="${checkinUrl}" target="_blank" rel="noopener">Öffnen</a>
+			</div>
+		</div>
+
+		<div class="card">
+			<h2>Header-Logos</h2>
+			<div id="header-panel">Lädt…</div>
+		</div>
+	`;
+
+	container.querySelector("#hasBreakTracking").addEventListener("change", (event) => {
+		container.querySelector("#budget-field").hidden = !event.target.checked;
+	});
+
+	container.querySelectorAll("[data-copy]").forEach((button) => {
+		button.addEventListener("click", () => copyToClipboard(button.dataset.copy, button));
+	});
+
+	container.querySelector("#settings-form").addEventListener("submit", async (event) => {
+		event.preventDefault();
+		const errorBox = container.querySelector("#settings-error");
+		errorBox.textContent = "";
+		try {
+			await api.updateCourse(token, course.id, {
+				name: container.querySelector("#name").value.trim(),
+				durationDays: Number(container.querySelector("#durationDays").value),
+				dailyBreakBudgetMinutes: Number(container.querySelector("#dailyBreakBudgetMinutes").value) || course.dailyBreakBudgetMinutes,
+				hasBreakTracking: container.querySelector("#hasBreakTracking").checked,
+				hasWorklogTracking: container.querySelector("#hasWorklogTracking").checked,
+			});
+			await refreshThisCourse();
+		} catch (error) {
+			if (handleAuthError(error)) return;
+			errorBox.textContent = error.message;
+			errorBox.className = "error";
+		}
+	});
+
+	await renderHeaderPanel(container.querySelector("#header-panel"), token, course, refreshThisCourse);
 }
 
 function imageOptionLabel(image) {
 	return `${image.filename} (${new Date(image.uploadedAt).toLocaleDateString("de-DE")})`;
 }
 
-async function renderHeaderPanel(container, token, course) {
-	container.innerHTML = `<p class="muted">Lädt Bild-Repository…</p>`;
+async function renderHeaderPanel(container, token, course, onSaved) {
 	let images = [];
 	try {
 		({ images } = await api.listImages(token));
@@ -142,7 +502,7 @@ async function renderHeaderPanel(container, token, course) {
 		<select id="header-right-select">${rightOptions}</select>
 		<div id="header-save-error"></div>
 		<button type="button" id="header-save">Speichern</button>
-		<p class="muted" style="margin-top: 10px;">Neue Bilder hochladen: siehe „Bild-Repository“ oben.</p>
+		<p class="muted" style="margin-top: 10px;">Neue Bilder hochladen: siehe Sidebar „Bilder“.</p>
 	`;
 
 	container.querySelector("#header-save").addEventListener("click", async (event) => {
@@ -153,10 +513,10 @@ async function renderHeaderPanel(container, token, course) {
 		try {
 			const headerLeftImageId = container.querySelector("#header-left-select").value || null;
 			const headerRightImageId = container.querySelector("#header-right-select").value || null;
-			const { course: updated } = await api.updateCourseHeader(token, course.id, { headerLeftImageId, headerRightImageId });
-			Object.assign(course, updated);
+			await api.updateCourseHeader(token, course.id, { headerLeftImageId, headerRightImageId });
 			button.textContent = "Gespeichert!";
 			setTimeout(() => (button.textContent = "Speichern"), 1500);
+			await onSaved();
 		} catch (error) {
 			errorBox.textContent = error.message;
 			errorBox.className = "error";
@@ -166,66 +526,261 @@ async function renderHeaderPanel(container, token, course) {
 	});
 }
 
-function courseRow(course, token, onSelectionChange) {
-	const dashboardUrl = courseUrl(`/d/${course.dashboardToken}`);
-	const checkinUrl = courseUrl(`/k/${course.checkinCode}`);
+// --- Tab: Teilnehmer ---------------------------------------------------
 
-	const tr = document.createElement("tr");
-	tr.innerHTML = `
-		<td><input type="checkbox" class="row-select" /></td>
-		<td>
-			<strong>${course.name}</strong>
-			<div class="muted">Start: ${course.startDate} · Laufzeit: ${course.durationDays} Tag(e) · Pausenbudget: ${course.dailyBreakBudgetMinutes} Min./Tag</div>
-			<div class="link-row">
-				<code>${dashboardUrl}</code>
-				<button type="button" class="secondary" data-copy="${dashboardUrl}">Dashboard kopieren</button>
-				<a href="${dashboardUrl}" target="_blank" rel="noopener">Öffnen</a>
-			</div>
-			<div class="link-row">
-				<code>${checkinUrl}</code>
-				<button type="button" class="secondary" data-copy="${checkinUrl}">Check-in kopieren</button>
-				<a href="${checkinUrl}" target="_blank" rel="noopener">Öffnen</a>
-			</div>
-			<button type="button" class="secondary" data-toggle-report>Report / Statistik</button>
-			<button type="button" class="secondary" data-toggle-header>Header-Logos</button>
-			<div class="card" data-report hidden style="margin-top: 10px;"></div>
-			<div class="card" data-header hidden style="margin-top: 10px;"></div>
-		</td>
+async function renderCourseParticipantsTab(container, token, course, { handleAuthError }) {
+	container.innerHTML = `<p class="muted">Lädt…</p>`;
+
+	let participants;
+	let groups;
+	try {
+		[{ participants }, { groups }] = await Promise.all([
+			api.listCourseParticipants(token, course.id),
+			api.listCourseGroups(token, course.id),
+		]);
+	} catch (error) {
+		if (handleAuthError(error)) return;
+		container.innerHTML = `<p class="error">${error.message}</p>`;
+		return;
+	}
+
+	function groupOptions(selectedId) {
+		return [
+			`<option value="">Keine Gruppe</option>`,
+			...groups.map((g) => `<option value="${g.id}" ${g.id === selectedId ? "selected" : ""}>${g.name}</option>`),
+		].join("");
+	}
+
+	if (participants.length === 0) {
+		container.innerHTML = '<p class="muted">Noch keine Teilnehmer registriert.</p>';
+		return;
+	}
+
+	const table = document.createElement("table");
+	table.innerHTML = `
+		<thead><tr><th>Name</th><th>Gruppe</th><th>Angemeldet seit</th><th></th></tr></thead>
+		<tbody></tbody>
 	`;
+	const tbody = table.querySelector("tbody");
 
-	tr.querySelector(".row-select").addEventListener("change", onSelectionChange);
-	tr.querySelectorAll("[data-copy]").forEach((button) => {
-		button.addEventListener("click", () => copyToClipboard(button.dataset.copy, button));
+	participants.forEach((participant) => {
+		const tr = document.createElement("tr");
+		const renderView = () => {
+			tr.innerHTML = `
+				<td>${participant.name}</td>
+				<td>${participant.groupName ?? "–"}</td>
+				<td>${new Date(participant.createdAt).toLocaleString("de-DE")}</td>
+				<td><button type="button" class="secondary" data-edit>Bearbeiten</button></td>
+			`;
+			tr.querySelector("[data-edit]").addEventListener("click", renderEdit);
+		};
+
+		const renderEdit = () => {
+			tr.innerHTML = `
+				<td colspan="4">
+					<label>Name</label>
+					<input type="text" id="edit-name-${participant.id}" value="${participant.name}" />
+					<label>Gruppe</label>
+					<select id="edit-group-${participant.id}">${groupOptions(participant.groupId)}</select>
+					<div id="edit-error-${participant.id}"></div>
+					<div class="link-row" style="margin-top: 10px;">
+						<button type="button" id="save-${participant.id}">Speichern</button>
+						<button type="button" class="secondary" id="cancel-${participant.id}">Abbrechen</button>
+						<button type="button" id="reset-pw-${participant.id}" style="color: var(--color-danger); border-color: var(--color-danger);" class="secondary">
+							Passwort zurücksetzen
+						</button>
+					</div>
+				</td>
+			`;
+
+			tr.querySelector(`#cancel-${participant.id}`).addEventListener("click", renderView);
+
+			tr.querySelector(`#save-${participant.id}`).addEventListener("click", async () => {
+				const errorBox = tr.querySelector(`#edit-error-${participant.id}`);
+				errorBox.textContent = "";
+				const name = tr.querySelector(`#edit-name-${participant.id}`).value.trim();
+				const groupIdRaw = tr.querySelector(`#edit-group-${participant.id}`).value;
+				const groupId = groupIdRaw ? Number(groupIdRaw) : null;
+				try {
+					const { participant: updated } = await api.updateParticipant(token, participant.id, { name, groupId });
+					participant.name = updated.name;
+					participant.groupId = updated.groupId;
+					participant.groupName = groups.find((g) => g.id === updated.groupId)?.name ?? null;
+					renderView();
+				} catch (error) {
+					if (handleAuthError(error)) return;
+					errorBox.textContent = error.message;
+					errorBox.className = "error";
+				}
+			});
+
+			tr.querySelector(`#reset-pw-${participant.id}`).addEventListener("click", async () => {
+				const confirmed = window.confirm(
+					`Passwort von "${participant.name}" zurücksetzen? Die Person wird dadurch abgemeldet und muss beim nächsten Aufruf ein neues Passwort vergeben.`,
+				);
+				if (!confirmed) return;
+				try {
+					await api.resetParticipantPassword(token, participant.id);
+					window.alert("Passwort wurde zurückgesetzt.");
+				} catch (error) {
+					if (handleAuthError(error)) return;
+					window.alert(error.message);
+				}
+			});
+		};
+
+		renderView();
+		tbody.appendChild(tr);
 	});
 
-	const reportPanel = tr.querySelector("[data-report]");
-	tr.querySelector("[data-toggle-report]").addEventListener("click", async () => {
-		const isHidden = reportPanel.hasAttribute("hidden");
-		if (isHidden) {
-			reportPanel.removeAttribute("hidden");
-			await renderReportPanel(reportPanel, token, course);
-		} else {
-			reportPanel.setAttribute("hidden", "");
-		}
-	});
-
-	const headerPanel = tr.querySelector("[data-header]");
-	tr.querySelector("[data-toggle-header]").addEventListener("click", async () => {
-		const isHidden = headerPanel.hasAttribute("hidden");
-		if (isHidden) {
-			headerPanel.removeAttribute("hidden");
-			await renderHeaderPanel(headerPanel, token, course);
-		} else {
-			headerPanel.setAttribute("hidden", "");
-		}
-	});
-
-	return tr;
+	container.innerHTML = "";
+	container.appendChild(table);
 }
 
-async function renderImageRepository(container, token) {
+// --- Tab: Gruppen -------------------------------------------------------
+
+async function renderCourseGroupsTab(container, token, course, { handleAuthError }) {
 	container.innerHTML = `
-		<h2>Bild-Repository</h2>
+		<div class="card">
+			<h2>Neue Gruppe anlegen</h2>
+			<form id="group-form">
+				<label for="group-name">Name</label>
+				<input type="text" id="group-name" required />
+				<div id="group-form-error"></div>
+				<button type="submit">Anlegen</button>
+			</form>
+		</div>
+		<div id="group-list"><p class="muted">Lädt…</p></div>
+	`;
+
+	container.querySelector("#group-form").addEventListener("submit", async (event) => {
+		event.preventDefault();
+		const errorBox = container.querySelector("#group-form-error");
+		errorBox.textContent = "";
+		const name = container.querySelector("#group-name").value.trim();
+		try {
+			await api.createCourseGroup(token, course.id, name);
+			event.target.reset();
+			await loadGroups();
+		} catch (error) {
+			if (handleAuthError(error)) return;
+			errorBox.textContent = error.message;
+			errorBox.className = "error";
+		}
+	});
+
+	async function loadGroups() {
+		const list = container.querySelector("#group-list");
+		let groups;
+		try {
+			({ groups } = await api.listCourseGroups(token, course.id));
+		} catch (error) {
+			if (handleAuthError(error)) return;
+			list.innerHTML = `<p class="error">${error.message}</p>`;
+			return;
+		}
+
+		if (groups.length === 0) {
+			list.innerHTML = '<p class="muted">Noch keine Gruppen angelegt.</p>';
+			return;
+		}
+
+		const table = document.createElement("table");
+		table.innerHTML = `<thead><tr><th>Name</th><th>Mitglieder</th><th></th></tr></thead><tbody></tbody>`;
+		const tbody = table.querySelector("tbody");
+
+		groups.forEach((group) => {
+			const tr = document.createElement("tr");
+			tr.innerHTML = `
+				<td><input type="text" value="${group.name}" data-name-input /></td>
+				<td>${group.memberCount}</td>
+				<td>
+					<button type="button" class="secondary" data-rename>Umbenennen</button>
+					<button type="button" class="secondary" data-delete style="color: var(--color-danger); border-color: var(--color-danger);">Löschen</button>
+				</td>
+			`;
+			tr.querySelector("[data-rename]").addEventListener("click", async () => {
+				const name = tr.querySelector("[data-name-input]").value.trim();
+				try {
+					await api.renameGroup(token, group.id, name);
+					await loadGroups();
+				} catch (error) {
+					if (handleAuthError(error)) return;
+					window.alert(error.message);
+				}
+			});
+			tr.querySelector("[data-delete]").addEventListener("click", async () => {
+				const confirmed = window.confirm(
+					`Gruppe "${group.name}" löschen? Mitglieder verlieren ihre Gruppenzuordnung (bleiben aber registriert).`,
+				);
+				if (!confirmed) return;
+				try {
+					await api.deleteGroup(token, group.id);
+					await loadGroups();
+				} catch (error) {
+					if (handleAuthError(error)) return;
+					window.alert(error.message);
+				}
+			});
+			tbody.appendChild(tr);
+		});
+
+		list.innerHTML = "";
+		list.appendChild(table);
+	}
+
+	await loadGroups();
+}
+
+// --- Tab: Report / Statistik --------------------------------------------
+
+async function downloadExport(token, course) {
+	const blob = await api.exportCourseXlsxBlob(token, course.id);
+	const url = URL.createObjectURL(blob);
+	const link = document.createElement("a");
+	link.href = url;
+	link.download = `${course.name.replace(/[^\p{L}\p{N}\- ]+/gu, "").trim() || "kurs"}.xlsx`;
+	document.body.appendChild(link);
+	link.click();
+	link.remove();
+	URL.revokeObjectURL(url);
+}
+
+async function renderCourseReportTab(container, token, course, { handleAuthError }) {
+	container.innerHTML = `<div class="card"><p class="muted">Lädt Statistik…</p></div>`;
+	try {
+		const stats = await api.getCourseStats(token, course.id);
+		container.innerHTML = `
+			<div class="card">
+				<h2>Statistik</h2>
+				<p class="muted">
+					${stats.participantCount} Teilnehmer(in) · Gesamt-Pausenzeit bisher: ${formatMinutes(stats.totalBreakMinutes)}
+				</p>
+				<button type="button" id="export-btn">Als Excel (.xlsx) exportieren</button>
+			</div>
+		`;
+		container.querySelector("#export-btn").addEventListener("click", async (event) => {
+			const button = event.target;
+			button.disabled = true;
+			button.textContent = "Erzeuge Datei…";
+			try {
+				await downloadExport(token, course);
+			} finally {
+				button.disabled = false;
+				button.textContent = "Als Excel (.xlsx) exportieren";
+			}
+		});
+	} catch (error) {
+		if (handleAuthError(error)) return;
+		container.innerHTML = `<p class="error">${error.message}</p>`;
+	}
+}
+
+// --- "Bilder"-Seite (Bild-Repository) ------------------------------------
+
+async function renderImagesPage(container, token) {
+	container.innerHTML = `
+		<h1>Bilder</h1>
 		<div class="card">
 			<p class="muted">
 				Zentrale Sammlung für Header-Logos. Das als Standard markierte Bild wird automatisch als
@@ -293,147 +848,4 @@ async function renderImageRepository(container, token) {
 	});
 
 	await loadImages();
-}
-
-async function renderCourses(root, token) {
-	root.innerHTML = `
-		<nav class="top">
-			<h1>Admin-Bereich</h1>
-			<button type="button" id="logout" class="secondary">Abmelden</button>
-		</nav>
-
-		<div id="image-repository"></div>
-
-		<div class="card">
-			<h2>Neuen Kurs anlegen</h2>
-			<form id="course-form">
-				<label for="name">Name</label>
-				<input type="text" id="name" required />
-
-				<label for="durationDays">Laufzeit (Tage)</label>
-				<input type="number" id="durationDays" min="1" step="1" required />
-
-				<label for="dailyBreakBudgetMinutes">Tägliches Pausenbudget (Minuten)</label>
-				<input type="number" id="dailyBreakBudgetMinutes" min="1" step="1" required />
-
-				<div id="course-form-error"></div>
-				<button type="submit">Kurs anlegen</button>
-			</form>
-		</div>
-
-		<h2>Bestehende Kurse</h2>
-		<div class="link-row" id="bulk-bar" hidden>
-			<strong><span id="selected-count">0</span> ausgewählt</strong>
-			<button type="button" id="bulk-delete" class="secondary" style="color: var(--color-danger); border-color: var(--color-danger);">
-				Endgültig löschen
-			</button>
-		</div>
-		<div id="course-list"><p class="muted">Lädt…</p></div>
-	`;
-
-	root.querySelector("#logout").addEventListener("click", () => {
-		clearToken();
-		renderLogin(root);
-	});
-
-	function handleAuthError(error) {
-		if (error.status === 401) {
-			clearToken();
-			renderLogin(root, "Sitzung abgelaufen, bitte erneut anmelden.");
-			return true;
-		}
-		return false;
-	}
-
-	root.querySelector("#course-form").addEventListener("submit", async (event) => {
-		event.preventDefault();
-		const errorBox = root.querySelector("#course-form-error");
-		errorBox.textContent = "";
-		const name = root.querySelector("#name").value.trim();
-		const durationDays = Number(root.querySelector("#durationDays").value);
-		const dailyBreakBudgetMinutes = Number(root.querySelector("#dailyBreakBudgetMinutes").value);
-
-		try {
-			await api.adminCreateCourse(token, { name, durationDays, dailyBreakBudgetMinutes });
-			event.target.reset();
-			await loadCourses();
-		} catch (error) {
-			if (handleAuthError(error)) return;
-			errorBox.textContent = error.message;
-			errorBox.className = "error";
-		}
-	});
-
-	function updateBulkBar() {
-		const checked = root.querySelectorAll(".row-select:checked");
-		const bar = root.querySelector("#bulk-bar");
-		root.querySelector("#selected-count").textContent = checked.length;
-		bar.hidden = checked.length === 0;
-	}
-
-	root.querySelector("#bulk-delete").addEventListener("click", async () => {
-		const rows = [...root.querySelectorAll("#course-table tbody tr")];
-		const selectedIds = rows
-			.filter((row) => row.querySelector(".row-select").checked)
-			.map((row) => Number(row.dataset.courseId));
-
-		if (selectedIds.length === 0) return;
-		const confirmed = window.confirm(
-			`${selectedIds.length} Kurs(e) inkl. aller Teilnehmerdaten endgültig löschen? Das kann nicht rückgängig gemacht werden.`,
-		);
-		if (!confirmed) return;
-
-		try {
-			await api.bulkDeleteCourses(token, selectedIds);
-			await loadCourses();
-		} catch (error) {
-			if (handleAuthError(error)) return;
-			window.alert(error.message);
-		}
-	});
-
-	async function loadCourses() {
-		const list = root.querySelector("#course-list");
-		try {
-			const { courses } = await api.adminListCourses(token);
-			if (courses.length === 0) {
-				list.innerHTML = '<p class="muted">Noch keine Kurse angelegt.</p>';
-				root.querySelector("#bulk-bar").hidden = true;
-				return;
-			}
-
-			const table = document.createElement("table");
-			table.id = "course-table";
-			table.innerHTML = `
-				<thead>
-					<tr>
-						<th><input type="checkbox" id="select-all" /></th>
-						<th>Kurs</th>
-					</tr>
-				</thead>
-				<tbody></tbody>
-			`;
-			const tbody = table.querySelector("tbody");
-			courses.forEach((course) => {
-				const row = courseRow(course, token, updateBulkBar);
-				row.dataset.courseId = course.id;
-				tbody.appendChild(row);
-			});
-
-			list.innerHTML = "";
-			list.appendChild(table);
-
-			table.querySelector("#select-all").addEventListener("change", (event) => {
-				tbody.querySelectorAll(".row-select").forEach((checkbox) => (checkbox.checked = event.target.checked));
-				updateBulkBar();
-			});
-			updateBulkBar();
-		} catch (error) {
-			if (handleAuthError(error)) return;
-			list.innerHTML = `<p class="error">${error.message}</p>`;
-		}
-	}
-
-	await renderImageRepository(root.querySelector("#image-repository"), token);
-	await loadCourses();
 }

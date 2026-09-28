@@ -16,6 +16,8 @@ interface CourseRow {
 	is_active: number;
 	header_left_image_id: string | null;
 	header_right_image_id: string | null;
+	has_break_tracking: number;
+	has_worklog_tracking: number;
 }
 
 type ParticipantStatus = "present" | "on_break" | "unknown";
@@ -30,7 +32,8 @@ interface ParticipantRow {
 async function getActiveCourseByCheckinCode(db: D1Database, checkinCode: string): Promise<CourseRow | null> {
 	const course = await db
 		.prepare(
-			`SELECT id, name, daily_break_budget_minutes, timezone, is_active, header_left_image_id, header_right_image_id
+			`SELECT id, name, daily_break_budget_minutes, timezone, is_active, header_left_image_id, header_right_image_id,
+			 has_break_tracking, has_worklog_tracking
 			 FROM courses WHERE checkin_code = ?1`,
 		)
 		.bind(checkinCode)
@@ -74,8 +77,22 @@ checkinRouter.get("/:checkinCode", async (request: IRequest, env: Env) => {
 			dailyBreakBudgetMinutes: course.daily_break_budget_minutes,
 			headerLeftImageId: leftImageId,
 			headerRightImageId: rightImageId,
+			hasBreakTracking: Boolean(course.has_break_tracking),
+			hasWorklogTracking: Boolean(course.has_worklog_tracking),
 		},
 	});
+});
+
+// Bestehende Gruppen des Kurses für das Auswahl-Dropdown bei der Anmeldung.
+checkinRouter.get("/:checkinCode/groups", async (request: IRequest, env: Env) => {
+	const course = await getActiveCourseByCheckinCode(env.DB, request.params.checkinCode);
+	if (!course) {
+		return Response.json({ error: "Kurs nicht gefunden" }, { status: 404 });
+	}
+	const { results } = await env.DB.prepare("SELECT name FROM groups WHERE course_id = ?1 ORDER BY name COLLATE NOCASE ASC")
+		.bind(course.id)
+		.all<{ name: string }>();
+	return Response.json({ groups: results.map((row) => row.name) });
 });
 
 checkinRouter.get("/:checkinCode/qrcode.svg", async (request: IRequest, env: Env) => {
@@ -119,9 +136,10 @@ checkinRouter.post("/:checkinCode/login", async (request: IRequest, env: Env) =>
 		return Response.json({ error: "Kurs nicht gefunden" }, { status: 404 });
 	}
 
-	const body = (await request.json().catch(() => null)) as { name?: string; password?: string } | null;
+	const body = (await request.json().catch(() => null)) as { name?: string; password?: string; group?: string } | null;
 	const name = body?.name?.trim();
 	const password = body?.password ?? "";
+	const groupName = body?.group?.trim();
 
 	if (!name || password.length < MIN_PASSWORD_LENGTH) {
 		return Response.json(
@@ -140,14 +158,27 @@ checkinRouter.post("/:checkinCode/login", async (request: IRequest, env: Env) =>
 	let accessToken: string;
 
 	if (!existing) {
+		if (!groupName) {
+			return Response.json({ error: "Gruppe ist erforderlich." }, { status: 400 });
+		}
+
+		let group = await env.DB.prepare("SELECT id FROM groups WHERE course_id = ?1 AND name = ?2 COLLATE NOCASE")
+			.bind(course.id, groupName)
+			.first<{ id: number }>();
+		if (!group) {
+			group = await env.DB.prepare("INSERT INTO groups (course_id, name) VALUES (?1, ?2) RETURNING id")
+				.bind(course.id, groupName)
+				.first<{ id: number }>();
+		}
+
 		accessToken = randomToken(PARTICIPANT_TOKEN_BYTES);
 		const passwordHash = await hashParticipantPassword(password);
 		let created: { id: number; name: string } | null;
 		try {
 			created = await env.DB.prepare(
-				"INSERT INTO participants (course_id, name, access_token, password_hash) VALUES (?1, ?2, ?3, ?4) RETURNING id, name",
+				"INSERT INTO participants (course_id, name, access_token, password_hash, group_id) VALUES (?1, ?2, ?3, ?4, ?5) RETURNING id, name",
 			)
-				.bind(course.id, name, accessToken, passwordHash)
+				.bind(course.id, name, accessToken, passwordHash, group!.id)
 				.first<{ id: number; name: string }>();
 		} catch {
 			return Response.json({ error: "Dieser Name wurde gerade eben schon vergeben. Bitte Seite neu laden." }, { status: 409 });

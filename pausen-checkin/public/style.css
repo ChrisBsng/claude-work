@@ -44,6 +44,131 @@ body {
 	padding: 24px 16px 64px;
 }
 
+#app.admin-app {
+	max-width: 1200px;
+	padding: 0;
+}
+
+.admin-layout {
+	display: flex;
+	align-items: flex-start;
+	min-height: 100vh;
+}
+
+.admin-sidebar {
+	width: 220px;
+	flex: 0 0 220px;
+	background: var(--color-surface);
+	border-right: 1px solid var(--color-border);
+	min-height: 100vh;
+	padding: 20px 0;
+	position: sticky;
+	top: 0;
+}
+
+.admin-sidebar-title {
+	font-weight: 700;
+	padding: 0 20px 14px;
+	font-size: 1.1rem;
+}
+
+.sidebar-item {
+	display: block;
+	width: 100%;
+	text-align: left;
+	background: none;
+	border: none;
+	padding: 10px 20px;
+	margin: 0;
+	font-size: 0.95rem;
+	font-weight: 600;
+	color: var(--color-text);
+	cursor: pointer;
+}
+
+.sidebar-item:hover {
+	background: var(--color-bg);
+}
+
+.sidebar-item.active {
+	background: var(--color-primary);
+	color: var(--color-primary-contrast);
+}
+
+.sidebar-subitem {
+	display: block;
+	width: 100%;
+	text-align: left;
+	background: none;
+	border: none;
+	padding: 8px 20px 8px 36px;
+	font-size: 0.88rem;
+	color: var(--color-muted);
+	cursor: pointer;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.sidebar-subitem:hover {
+	background: var(--color-bg);
+}
+
+.sidebar-subitem.active {
+	background: var(--color-primary);
+	color: var(--color-primary-contrast);
+}
+
+.sidebar-subitem.add-new {
+	font-style: italic;
+}
+
+.admin-main {
+	flex: 1 1 auto;
+	padding: 24px 28px 64px;
+	min-width: 0;
+}
+
+.tab-bar {
+	display: flex;
+	gap: 4px;
+	border-bottom: 1px solid var(--color-border);
+	margin-bottom: 20px;
+}
+
+.tab-button {
+	background: none;
+	border: none;
+	padding: 10px 16px;
+	margin: 0;
+	font-weight: 600;
+	color: var(--color-muted);
+	cursor: pointer;
+	border-bottom: 2px solid transparent;
+}
+
+.tab-button.active {
+	color: var(--color-primary);
+	border-bottom-color: var(--color-primary);
+}
+
+.toggle-row {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	margin-top: 14px;
+}
+
+.toggle-row input[type="checkbox"] {
+	width: 18px;
+	height: 18px;
+}
+
+.toggle-row label {
+	margin: 0;
+	font-weight: 500;
+}
+
 #app.dashboard-app {
 	max-width: 1200px;
 }

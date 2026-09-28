@@ -20,6 +20,8 @@ interface CourseRow {
 	is_active: number;
 	header_left_image_id: string | null;
 	header_right_image_id: string | null;
+	has_break_tracking: number;
+	has_worklog_tracking: number;
 }
 
 interface ParticipantRow {
@@ -31,7 +33,7 @@ async function getCourseByDashboardToken(db: D1Database, dashboardToken: string)
 	return db
 		.prepare(
 			`SELECT id, name, start_date, duration_days, daily_break_budget_minutes, timezone, checkin_code, is_active,
-			 header_left_image_id, header_right_image_id
+			 header_left_image_id, header_right_image_id, has_break_tracking, has_worklog_tracking
 			 FROM courses WHERE dashboard_token = ?1`,
 		)
 		.bind(dashboardToken)
@@ -49,6 +51,8 @@ async function serializeCourse(db: D1Database, course: CourseRow) {
 		isActive: Boolean(course.is_active),
 		headerLeftImageId: leftImageId,
 		headerRightImageId: rightImageId,
+		hasBreakTracking: Boolean(course.has_break_tracking),
+		hasWorklogTracking: Boolean(course.has_worklog_tracking),
 	};
 }
 

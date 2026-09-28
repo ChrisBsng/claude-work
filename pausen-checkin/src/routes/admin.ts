@@ -29,10 +29,12 @@ interface CourseRow {
 	created_at: string;
 	header_left_image_id: string | null;
 	header_right_image_id: string | null;
+	has_break_tracking: number;
+	has_worklog_tracking: number;
 }
 
 const COURSE_COLUMNS =
-	"id, name, start_date, duration_days, daily_break_budget_minutes, timezone, checkin_code, dashboard_token, is_active, created_at, header_left_image_id, header_right_image_id";
+	"id, name, start_date, duration_days, daily_break_budget_minutes, timezone, checkin_code, dashboard_token, is_active, created_at, header_left_image_id, header_right_image_id, has_break_tracking, has_worklog_tracking";
 
 async function loadDefaultHeaderLeftImageId(db: D1Database): Promise<string | null> {
 	const setting = await db
@@ -55,6 +57,8 @@ function serializeCourse(course: CourseRow, defaultHeaderLeftImageId: string | n
 		headerLeftImageId: course.header_left_image_id ?? defaultHeaderLeftImageId,
 		headerLeftImageOverrideId: course.header_left_image_id,
 		headerRightImageId: course.header_right_image_id,
+		hasBreakTracking: Boolean(course.has_break_tracking),
+		hasWorklogTracking: Boolean(course.has_worklog_tracking),
 	};
 }
 
@@ -85,12 +89,20 @@ adminRouter.get("/courses", requireAdmin, async (_request: IRequest, env: Env) =
 
 adminRouter.post("/courses", requireAdmin, async (request: IRequest, env: Env) => {
 	const body = (await request.json().catch(() => null)) as
-		| { name?: string; durationDays?: number; dailyBreakBudgetMinutes?: number }
+		| {
+				name?: string;
+				durationDays?: number;
+				dailyBreakBudgetMinutes?: number;
+				hasBreakTracking?: boolean;
+				hasWorklogTracking?: boolean;
+		  }
 		| null;
 
 	const name = body?.name?.trim();
 	const durationDays = Number(body?.durationDays);
 	const dailyBreakBudgetMinutes = Number(body?.dailyBreakBudgetMinutes);
+	const hasBreakTracking = body?.hasBreakTracking ?? true;
+	const hasWorklogTracking = body?.hasWorklogTracking ?? false;
 
 	if (
 		!name ||
@@ -112,15 +124,61 @@ adminRouter.post("/courses", requireAdmin, async (request: IRequest, env: Env) =
 	const dashboardToken = randomToken(DASHBOARD_TOKEN_BYTES);
 
 	const course = await env.DB.prepare(
-		`INSERT INTO courses (name, duration_days, daily_break_budget_minutes, checkin_code, dashboard_token)
-		 VALUES (?1, ?2, ?3, ?4, ?5)
+		`INSERT INTO courses (name, duration_days, daily_break_budget_minutes, checkin_code, dashboard_token, has_break_tracking, has_worklog_tracking)
+		 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
 		 RETURNING ${COURSE_COLUMNS}`,
 	)
-		.bind(name, durationDays, dailyBreakBudgetMinutes, checkinCode, dashboardToken)
+		.bind(name, durationDays, dailyBreakBudgetMinutes, checkinCode, dashboardToken, hasBreakTracking ? 1 : 0, hasWorklogTracking ? 1 : 0)
 		.first<CourseRow>();
 
 	const defaultHeaderLeftImageId = await loadDefaultHeaderLeftImageId(env.DB);
 	return Response.json({ course: serializeCourse(course!, defaultHeaderLeftImageId) }, { status: 201 });
+});
+
+// Allgemeine Kurseinstellungen bearbeiten (nicht die Header-Logos, dafür
+// gibt es den eigenen /header-Endpunkt). Alle Felder optional/partiell.
+adminRouter.patch("/courses/:id", requireAdmin, async (request: IRequest, env: Env) => {
+	const course = await loadCourseOr404(env.DB, Number(request.params.id));
+	if (!course) {
+		return Response.json({ error: "Kurs nicht gefunden" }, { status: 404 });
+	}
+
+	const body = (await request.json().catch(() => null)) as
+		| {
+				name?: string;
+				durationDays?: number;
+				dailyBreakBudgetMinutes?: number;
+				hasBreakTracking?: boolean;
+				hasWorklogTracking?: boolean;
+		  }
+		| null;
+	if (!body) {
+		return Response.json({ error: "Ungültige Anfrage" }, { status: 400 });
+	}
+
+	const name = body.name !== undefined ? body.name.trim() : course.name;
+	const durationDays = body.durationDays !== undefined ? Number(body.durationDays) : course.duration_days;
+	const dailyBreakBudgetMinutes =
+		body.dailyBreakBudgetMinutes !== undefined ? Number(body.dailyBreakBudgetMinutes) : course.daily_break_budget_minutes;
+	const hasBreakTracking = body.hasBreakTracking !== undefined ? body.hasBreakTracking : Boolean(course.has_break_tracking);
+	const hasWorklogTracking = body.hasWorklogTracking !== undefined ? body.hasWorklogTracking : Boolean(course.has_worklog_tracking);
+
+	if (!name || !Number.isInteger(durationDays) || durationDays <= 0 || durationDays > MAX_DURATION_DAYS) {
+		return Response.json({ error: `Name und Laufzeit (1–${MAX_DURATION_DAYS} Tage) sind erforderlich.` }, { status: 400 });
+	}
+	if (!Number.isInteger(dailyBreakBudgetMinutes) || dailyBreakBudgetMinutes <= 0) {
+		return Response.json({ error: "Tägliches Pausenbudget muss eine positive Zahl sein." }, { status: 400 });
+	}
+
+	const updated = await env.DB.prepare(
+		`UPDATE courses SET name = ?1, duration_days = ?2, daily_break_budget_minutes = ?3, has_break_tracking = ?4, has_worklog_tracking = ?5
+		 WHERE id = ?6 RETURNING ${COURSE_COLUMNS}`,
+	)
+		.bind(name, durationDays, dailyBreakBudgetMinutes, hasBreakTracking ? 1 : 0, hasWorklogTracking ? 1 : 0, course.id)
+		.first<CourseRow>();
+
+	const defaultHeaderLeftImageId = await loadDefaultHeaderLeftImageId(env.DB);
+	return Response.json({ course: serializeCourse(updated!, defaultHeaderLeftImageId) });
 });
 
 // Header-Logos eines einzelnen Kurses setzen/zurücksetzen. null bei left
@@ -287,6 +345,196 @@ adminRouter.get("/courses/:id/export.xlsx", requireAdmin, async (request: IReque
 			"Content-Disposition": `attachment; filename="${safeFileName}.xlsx"`,
 		},
 	});
+});
+
+// --- Gruppen ---
+
+interface GroupRow {
+	id: number;
+	course_id: number;
+	name: string;
+	created_at: string;
+}
+
+adminRouter.get("/courses/:id/groups", requireAdmin, async (request: IRequest, env: Env) => {
+	const course = await loadCourseOr404(env.DB, Number(request.params.id));
+	if (!course) {
+		return Response.json({ error: "Kurs nicht gefunden" }, { status: 404 });
+	}
+
+	const { results: groups } = await env.DB.prepare(
+		"SELECT id, name, created_at FROM groups WHERE course_id = ?1 ORDER BY name COLLATE NOCASE ASC",
+	)
+		.bind(course.id)
+		.all<{ id: number; name: string; created_at: string }>();
+
+	const { results: counts } = await env.DB.prepare(
+		"SELECT group_id, COUNT(*) AS count FROM participants WHERE course_id = ?1 AND group_id IS NOT NULL GROUP BY group_id",
+	)
+		.bind(course.id)
+		.all<{ group_id: number; count: number }>();
+	const countByGroup = new Map(counts.map((c) => [c.group_id, c.count]));
+
+	return Response.json({
+		groups: groups.map((g) => ({ id: g.id, name: g.name, createdAt: g.created_at, memberCount: countByGroup.get(g.id) ?? 0 })),
+	});
+});
+
+adminRouter.post("/courses/:id/groups", requireAdmin, async (request: IRequest, env: Env) => {
+	const course = await loadCourseOr404(env.DB, Number(request.params.id));
+	if (!course) {
+		return Response.json({ error: "Kurs nicht gefunden" }, { status: 404 });
+	}
+
+	const body = (await request.json().catch(() => null)) as { name?: string } | null;
+	const name = body?.name?.trim();
+	if (!name) {
+		return Response.json({ error: "Gruppenname ist erforderlich." }, { status: 400 });
+	}
+
+	let group: GroupRow | null;
+	try {
+		group = await env.DB.prepare("INSERT INTO groups (course_id, name) VALUES (?1, ?2) RETURNING *")
+			.bind(course.id, name)
+			.first<GroupRow>();
+	} catch {
+		return Response.json({ error: "Eine Gruppe mit diesem Namen existiert in diesem Kurs bereits." }, { status: 409 });
+	}
+
+	return Response.json({ group: { id: group!.id, name: group!.name, createdAt: group!.created_at, memberCount: 0 } }, { status: 201 });
+});
+
+adminRouter.patch("/groups/:groupId", requireAdmin, async (request: IRequest, env: Env) => {
+	const groupId = Number(request.params.groupId);
+	const body = (await request.json().catch(() => null)) as { name?: string } | null;
+	const name = body?.name?.trim();
+	if (!name) {
+		return Response.json({ error: "Gruppenname ist erforderlich." }, { status: 400 });
+	}
+
+	let group: GroupRow | null;
+	try {
+		group = await env.DB.prepare("UPDATE groups SET name = ?1 WHERE id = ?2 RETURNING *").bind(name, groupId).first<GroupRow>();
+	} catch {
+		return Response.json({ error: "Eine Gruppe mit diesem Namen existiert in diesem Kurs bereits." }, { status: 409 });
+	}
+	if (!group) {
+		return Response.json({ error: "Gruppe nicht gefunden" }, { status: 404 });
+	}
+
+	return Response.json({ group: { id: group.id, name: group.name, createdAt: group.created_at } });
+});
+
+adminRouter.delete("/groups/:groupId", requireAdmin, async (request: IRequest, env: Env) => {
+	const groupId = Number(request.params.groupId);
+	await env.DB.batch([
+		env.DB.prepare("UPDATE participants SET group_id = NULL WHERE group_id = ?1").bind(groupId),
+		env.DB.prepare("DELETE FROM groups WHERE id = ?1").bind(groupId),
+	]);
+	return Response.json({ deletedId: groupId });
+});
+
+// --- Teilnehmer (Admin-Verwaltung) ---
+
+interface ParticipantAdminRow {
+	id: number;
+	name: string;
+	group_id: number | null;
+	group_name: string | null;
+	created_at: string;
+}
+
+adminRouter.get("/courses/:id/participants", requireAdmin, async (request: IRequest, env: Env) => {
+	const course = await loadCourseOr404(env.DB, Number(request.params.id));
+	if (!course) {
+		return Response.json({ error: "Kurs nicht gefunden" }, { status: 404 });
+	}
+
+	const { results } = await env.DB.prepare(
+		`SELECT p.id, p.name, p.group_id, g.name AS group_name, p.created_at
+		 FROM participants p LEFT JOIN groups g ON g.id = p.group_id
+		 WHERE p.course_id = ?1 ORDER BY p.name COLLATE NOCASE ASC`,
+	)
+		.bind(course.id)
+		.all<ParticipantAdminRow>();
+
+	return Response.json({
+		participants: results.map((p) => ({
+			id: p.id,
+			name: p.name,
+			groupId: p.group_id,
+			groupName: p.group_name,
+			createdAt: p.created_at,
+		})),
+	});
+});
+
+adminRouter.patch("/participants/:id", requireAdmin, async (request: IRequest, env: Env) => {
+	const participantId = Number(request.params.id);
+	const existing = await env.DB.prepare("SELECT id, course_id, name FROM participants WHERE id = ?1")
+		.bind(participantId)
+		.first<{ id: number; course_id: number; name: string }>();
+	if (!existing) {
+		return Response.json({ error: "Teilnehmer nicht gefunden" }, { status: 404 });
+	}
+
+	const body = (await request.json().catch(() => null)) as { name?: string; groupId?: number | null } | null;
+	if (!body) {
+		return Response.json({ error: "Ungültige Anfrage" }, { status: 400 });
+	}
+
+	const name = body.name !== undefined ? body.name.trim() : existing.name;
+	if (!name) {
+		return Response.json({ error: "Name darf nicht leer sein." }, { status: 400 });
+	}
+
+	let groupId: number | null | undefined = undefined;
+	if (body.groupId !== undefined) {
+		groupId = body.groupId;
+		if (groupId !== null) {
+			const group = await env.DB.prepare("SELECT id FROM groups WHERE id = ?1 AND course_id = ?2")
+				.bind(groupId, existing.course_id)
+				.first();
+			if (!group) {
+				return Response.json({ error: "Gruppe nicht gefunden" }, { status: 404 });
+			}
+		}
+	}
+
+	let updated;
+	try {
+		updated = await env.DB.prepare(
+			groupId === undefined
+				? "UPDATE participants SET name = ?1 WHERE id = ?2 RETURNING id, name, group_id"
+				: "UPDATE participants SET name = ?1, group_id = ?2 WHERE id = ?3 RETURNING id, name, group_id",
+		)
+			.bind(...(groupId === undefined ? [name, participantId] : [name, groupId, participantId]))
+			.first<{ id: number; name: string; group_id: number | null }>();
+	} catch {
+		return Response.json({ error: "Dieser Name wird im Kurs bereits verwendet." }, { status: 409 });
+	}
+
+	return Response.json({ participant: { id: updated!.id, name: updated!.name, groupId: updated!.group_id } });
+});
+
+// Setzt das Passwort zurück UND rotiert den Geräte-Token: die Person
+// wird dadurch auf allen Geräten "ausgeloggt" (die alte access_token wird
+// ungültig) und muss sich beim nächsten Aufruf mit einem neuen Passwort
+// neu anmelden.
+adminRouter.post("/participants/:id/reset-password", requireAdmin, async (request: IRequest, env: Env) => {
+	const participantId = Number(request.params.id);
+	const newAccessToken = randomToken(20);
+	const updated = await env.DB.prepare(
+		"UPDATE participants SET password_hash = NULL, access_token = ?1 WHERE id = ?2 RETURNING id",
+	)
+		.bind(newAccessToken, participantId)
+		.first<{ id: number }>();
+
+	if (!updated) {
+		return Response.json({ error: "Teilnehmer nicht gefunden" }, { status: 404 });
+	}
+
+	return Response.json({ ok: true });
 });
 
 // --- Bild-Repository (Header-Logos, gespeichert in R2) ---

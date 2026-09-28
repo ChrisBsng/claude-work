@@ -52,6 +52,12 @@ export const api = {
 			body: { ids },
 			headers: { Authorization: `Bearer ${token}` },
 		}),
+	updateCourse: (token, courseId, patch) =>
+		request(`/api/admin/courses/${courseId}`, {
+			method: "PATCH",
+			body: patch,
+			headers: { Authorization: `Bearer ${token}` },
+		}),
 	updateCourseHeader: (token, courseId, header) =>
 		request(`/api/admin/courses/${courseId}/header`, {
 			method: "PATCH",
@@ -62,6 +68,33 @@ export const api = {
 		request(`/api/admin/courses/${courseId}/stats`, { headers: { Authorization: `Bearer ${token}` } }),
 	exportCourseXlsxBlob: (token, courseId) =>
 		requestBlob(`/api/admin/courses/${courseId}/export.xlsx`, { headers: { Authorization: `Bearer ${token}` } }),
+
+	listCourseGroups: (token, courseId) =>
+		request(`/api/admin/courses/${courseId}/groups`, { headers: { Authorization: `Bearer ${token}` } }),
+	createCourseGroup: (token, courseId, name) =>
+		request(`/api/admin/courses/${courseId}/groups`, {
+			method: "POST",
+			body: { name },
+			headers: { Authorization: `Bearer ${token}` },
+		}),
+	renameGroup: (token, groupId, name) =>
+		request(`/api/admin/groups/${groupId}`, { method: "PATCH", body: { name }, headers: { Authorization: `Bearer ${token}` } }),
+	deleteGroup: (token, groupId) =>
+		request(`/api/admin/groups/${groupId}`, { method: "DELETE", headers: { Authorization: `Bearer ${token}` } }),
+
+	listCourseParticipants: (token, courseId) =>
+		request(`/api/admin/courses/${courseId}/participants`, { headers: { Authorization: `Bearer ${token}` } }),
+	updateParticipant: (token, participantId, patch) =>
+		request(`/api/admin/participants/${participantId}`, {
+			method: "PATCH",
+			body: patch,
+			headers: { Authorization: `Bearer ${token}` },
+		}),
+	resetParticipantPassword: (token, participantId) =>
+		request(`/api/admin/participants/${participantId}/reset-password`, {
+			method: "POST",
+			headers: { Authorization: `Bearer ${token}` },
+		}),
 
 	listImages: (token) => request("/api/admin/images", { headers: { Authorization: `Bearer ${token}` } }),
 	uploadImage: async (token, file) => {
@@ -93,8 +126,9 @@ export const api = {
 
 	getCourseByCheckinCode: (checkinCode) => request(`/api/checkin/${checkinCode}`),
 	getCheckinParticipantNames: (checkinCode) => request(`/api/checkin/${checkinCode}/participants`),
-	loginParticipant: (checkinCode, name, password) =>
-		request(`/api/checkin/${checkinCode}/login`, { method: "POST", body: { name, password } }),
+	getCheckinGroups: (checkinCode) => request(`/api/checkin/${checkinCode}/groups`),
+	loginParticipant: (checkinCode, name, password, group) =>
+		request(`/api/checkin/${checkinCode}/login`, { method: "POST", body: { name, password, group } }),
 	getMe: (checkinCode, accessToken) =>
 		request(`/api/checkin/${checkinCode}/me`, { headers: { "X-Access-Token": accessToken } }),
 	toggleCheckin: (checkinCode, accessToken, status) =>

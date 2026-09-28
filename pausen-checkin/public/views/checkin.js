@@ -41,18 +41,25 @@ export async function renderCheckin(root, checkinCode) {
 
 async function renderLogin(root, checkinCode, course) {
 	let names = [];
+	let groups = [];
 	try {
 		({ names } = await api.getCheckinParticipantNames(checkinCode));
 	} catch {
 		// Ohne Namensliste geht es auch, dann eben nur Freitext-Eingabe.
 	}
+	try {
+		({ groups } = await api.getCheckinGroups(checkinCode));
+	} catch {
+		// Ohne Gruppenliste geht es auch, dann eben nur Freitext-Eingabe.
+	}
 
 	const hasNames = names.length > 0;
+	const hasGroups = groups.length > 0;
 
 	root.innerHTML = `
 		${renderBrandHeader(course)}
 		<h1>${course.name}</h1>
-		<p class="muted">Tägliches Pausenbudget: ${course.dailyBreakBudgetMinutes} Minuten</p>
+		${course.hasBreakTracking ? `<p class="muted">Tägliches Pausenbudget: ${course.dailyBreakBudgetMinutes} Minuten</p>` : ""}
 		<div class="card">
 			<h2>Anmelden</h2>
 			<form id="login-form">
@@ -72,6 +79,24 @@ async function renderLogin(root, checkinCode, course) {
 						<input type="text" id="new-name" autofocus required />`
 				}
 
+				<div id="group-field-wrapper" ${hasNames ? "hidden" : ""}>
+					${
+						hasGroups
+							? `<label for="group-select">Deine Gruppe</label>
+							<select id="group-select">
+								<option value="">-- Auswählen --</option>
+								${groups.map((g) => `<option value="${g}">${g}</option>`).join("")}
+								<option value="__new__">Neue Gruppe / nicht in der Liste</option>
+							</select>
+							<div id="new-group-wrapper" hidden>
+								<label for="new-group">Neue Gruppe</label>
+								<input type="text" id="new-group" />
+							</div>`
+							: `<label for="new-group">Deine Gruppe</label>
+							<input type="text" id="new-group" />`
+					}
+				</div>
+
 				<label for="password">Passwort</label>
 				<input type="password" id="password" minlength="4" required />
 				<p class="muted">
@@ -87,11 +112,23 @@ async function renderLogin(root, checkinCode, course) {
 
 	const nameSelect = root.querySelector("#name-select");
 	const newNameWrapper = root.querySelector("#new-name-wrapper");
+	const groupFieldWrapper = root.querySelector("#group-field-wrapper");
 	if (nameSelect) {
 		nameSelect.addEventListener("change", () => {
 			const isNew = nameSelect.value === "__new__";
 			newNameWrapper.hidden = !isNew;
+			groupFieldWrapper.hidden = !isNew;
 			if (isNew) root.querySelector("#new-name").focus();
+		});
+	}
+
+	const groupSelect = root.querySelector("#group-select");
+	const newGroupWrapper = root.querySelector("#new-group-wrapper");
+	if (groupSelect) {
+		groupSelect.addEventListener("change", () => {
+			const isNew = groupSelect.value === "__new__";
+			newGroupWrapper.hidden = !isNew;
+			if (isNew) root.querySelector("#new-group").focus();
 		});
 	}
 
@@ -100,7 +137,11 @@ async function renderLogin(root, checkinCode, course) {
 		const errorBox = root.querySelector("#login-error");
 		errorBox.textContent = "";
 
-		const name = (nameSelect && nameSelect.value !== "__new__" ? nameSelect.value : root.querySelector("#new-name")?.value)?.trim();
+		const isNewParticipant = !hasNames || nameSelect.value === "__new__";
+		const name = (isNewParticipant ? root.querySelector("#new-name")?.value : nameSelect.value)?.trim();
+		const group = isNewParticipant
+			? (groupSelect && groupSelect.value !== "__new__" ? groupSelect.value : root.querySelector("#new-group")?.value)?.trim()
+			: undefined;
 		const password = root.querySelector("#password").value;
 
 		if (!name) {
@@ -108,9 +149,14 @@ async function renderLogin(root, checkinCode, course) {
 			errorBox.className = "error";
 			return;
 		}
+		if (isNewParticipant && !group) {
+			errorBox.textContent = "Bitte eine Gruppe angeben.";
+			errorBox.className = "error";
+			return;
+		}
 
 		try {
-			const result = await api.loginParticipant(checkinCode, name, password);
+			const result = await api.loginParticipant(checkinCode, name, password, group);
 			localStorage.setItem(tokenKey(checkinCode), result.accessToken);
 			renderStatus(root, checkinCode, course, result.accessToken, result);
 		} catch (error) {
@@ -156,7 +202,8 @@ function renderStatus(root, checkinCode, course, accessToken, data) {
 			`;
 		} else {
 			const isPresent = participant.status === "present";
-			actionHtml = `
+			const budgetHtml = course.hasBreakTracking
+				? `
 				<p class="muted" style="margin-top: 20px;">
 					Pausenbudget heute: ${budget.usedMinutesToday} / ${course.dailyBreakBudgetMinutes} Min. verbraucht
 				</p>
@@ -164,6 +211,10 @@ function renderStatus(root, checkinCode, course, accessToken, data) {
 					<span style="width: ${Math.min(100, (budget.usedMinutesToday / course.dailyBreakBudgetMinutes) * 100)}%"></span>
 				</div>
 				<p>${budget.remainingMinutesToday} Minuten übrig</p>
+			`
+				: "";
+			actionHtml = `
+				${budgetHtml}
 				<button type="button" id="toggle" class="toggle-button ${participant.status}">
 					${isPresent ? "Pause beginnen" : "Zurück von der Pause"}
 				</button>
