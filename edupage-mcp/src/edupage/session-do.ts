@@ -84,6 +84,7 @@ export interface NameLookup {
 	subjects: Record<string, string>;
 	classes: Record<string, string>;
 	classrooms: Record<string, string>;
+	students: Record<string, string>;
 }
 
 /** Rohe Antwortform von mainDBIAccessor (nur die hier genutzten Felder). */
@@ -91,6 +92,8 @@ interface RawDbiRow {
 	id: string;
 	name?: string;
 	short?: string;
+	firstname?: string;
+	lastname?: string;
 }
 interface RawDbiTable {
 	id: string;
@@ -109,6 +112,166 @@ function headerText(header?: RawTimetableHeaderEntry[]): string | undefined {
 function resolveNames(ids: string[] | undefined, table: Record<string, string>): string[] | undefined {
 	if (!ids || ids.length === 0) return undefined;
 	return ids.map((id) => table[id] ?? id);
+}
+
+interface RawAttendanceCell {
+	note?: string;
+	presence?: string;
+	studentabsent_typeid?: string;
+	subjectid?: string;
+	teacherids?: string[];
+}
+
+export interface AttendanceItem {
+	date: string;
+	period: string;
+	student: string;
+	/** "anwesend" | "abwesend" | "verspätet" | "entschuldigt" | roher Code, falls unbekannt */
+	presence: string;
+	absentType?: string;
+	subject?: string;
+	teachers?: string[];
+	note?: string;
+}
+
+// Presence-Codes aus dem Kontextmenü der Anwesenheits-Ansicht (P/A/L/E-Buttons
+// in dochadzka.js). Die Labels für P/A/L sind aus der Button-Reihenfolge und
+// gängiger Attendance-Semantik abgeleitet; "E" (ls(9255), Text nicht direkt
+// eingesehen) ist die unsicherste Zuordnung.
+function presenceLabel(code: string | undefined): string {
+	switch (code) {
+		case "P":
+			return "anwesend";
+		case "A":
+			return "abwesend";
+		case "L":
+			return "verspätet";
+		case "E":
+			return "entschuldigt";
+		case undefined:
+		case "":
+			return "anwesend";
+		default:
+			return code;
+	}
+}
+
+/**
+ * Dekodiert Edupages proprietäres `ASC.json_dc([struktur, dict])`-Kompaktformat
+ * (verwendet u. a. von /gcall-Antworten wie der Anwesenheits-Ansicht). Portiert
+ * 1:1 aus der `json_dc`-Funktion in Edupages eigenem `bundle_main.min.js`
+ * (gegen echte Antworten verifiziert):
+ *
+ * - Token -1: Array, gefolgt von Länge, dann so viele dekodierte Elemente.
+ * - Token -2: Objekt, gefolgt von Länge, dann so viele Keys (dekodiert),
+ *   dann so viele Values (dekodiert). Das Key-Set wird für spätere
+ *   Objekte mit denselben Keys gemerkt (siehe unten).
+ * - Token -3/-4/-5: leeres/1-/2-elementiges Array (Kurzform).
+ * - Andere negative Tokens < -9: Verweis auf ein früher gesehenes Key-Set
+ *   (Index `-token-10`), gefolgt von so vielen Values wie Keys im Set -
+ *   spart wiederholte Key-Strings bei vielen gleich geformten Objekten
+ *   (z. B. eine Zelle pro Schüler/Datum/Stunde).
+ * - Token >= 0: Index ins Dictionary-Array (Literalwert; Arrays werden
+ *   kopiert, damit spätere Mutation den Dictionary-Eintrag nicht verändert).
+ */
+function decodeJsonDc(payload: [unknown[], unknown[]]): unknown {
+	const structure = payload[0] as number[];
+	const dict = payload[1] as unknown[];
+	const keySets: string[][] = [];
+	let pos = 0;
+
+	function decode(): unknown {
+		const token = structure[pos++];
+		switch (token) {
+			case -1: {
+				const len = structure[pos++] as number;
+				const arr: unknown[] = [];
+				for (let i = 0; i < len; i++) arr.push(decode());
+				return arr;
+			}
+			case -2: {
+				const len = structure[pos++] as number;
+				const keys: string[] = [];
+				for (let i = 0; i < len; i++) keys.push(decode() as string);
+				keySets.push(keys);
+				const obj: Record<string, unknown> = {};
+				for (let i = 0; i < len; i++) obj[keys[i]] = decode();
+				return obj;
+			}
+			case -3:
+				return [];
+			case -4:
+				return [decode()];
+			case -5:
+				return [decode(), decode()];
+		}
+		if (token < 0) {
+			const keys = keySets[-token - 10] ?? [];
+			const obj: Record<string, unknown> = {};
+			for (const key of keys) obj[key] = decode();
+			return obj;
+		}
+		const value = dict[token as number];
+		return Array.isArray(value) ? value.slice() : value;
+	}
+
+	return decode();
+}
+
+/**
+ * Findet alle `ASC.json_dc([...])`-Aufrufe in einem rohen `"JS:"`-/gcall-
+ * Antworttext und liefert ihre (noch unkodierten) Argument-Arrays. Sucht
+ * klammertief- und string-bewusst nach dem Ende jedes Arrays, statt naiv
+ * nach der nächsten `])`-Zeichenkette (die auch in einem String-Wert
+ * vorkommen könnte).
+ */
+function extractJsonDcPayloads(js: string): Array<[unknown[], unknown[]]> {
+	const marker = "ASC.json_dc(";
+	const payloads: Array<[unknown[], unknown[]]> = [];
+	let searchFrom = 0;
+
+	while (true) {
+		const markerIdx = js.indexOf(marker, searchFrom);
+		if (markerIdx === -1) break;
+		const argStart = markerIdx + marker.length;
+
+		let i = argStart;
+		let depth = 0;
+		let inString = false;
+		for (; i < js.length; i++) {
+			const ch = js[i];
+			if (inString) {
+				if (ch === "\\") {
+					i++;
+					continue;
+				}
+				if (ch === '"') inString = false;
+				continue;
+			}
+			if (ch === '"') {
+				inString = true;
+				continue;
+			}
+			if (ch === "[") depth++;
+			else if (ch === "]") {
+				depth--;
+				if (depth === 0) {
+					i++;
+					break;
+				}
+			}
+		}
+
+		const argText = js.slice(argStart, i);
+		try {
+			payloads.push(JSON.parse(argText));
+		} catch {
+			// Unerwartetes/kaputtes Payload - überspringen statt den ganzen Aufruf scheitern zu lassen.
+		}
+		searchFrom = Math.max(i, markerIdx + marker.length);
+	}
+
+	return payloads;
 }
 
 /**
@@ -316,32 +479,157 @@ export class EdupageSessionDO extends DurableObject<Env> {
 	 * (Kürzel) angefragt, nicht der volle Name - das ist bereits die
 	 * Darstellung, die Edupage selbst im Stundenplan verwendet.
 	 */
-	async getNameLookup(credentials: EdupageCredentials, datefrom: string, dateto: string): Promise<NameLookup> {
+	async getNameLookup(
+		credentials: EdupageCredentials,
+		datefrom: string,
+		dateto: string,
+		options: { includeStudents?: boolean } = {},
+	): Promise<NameLookup> {
 		const year = Number(datefrom.slice(0, 4));
+		const neededPart: Record<string, string[]> = {
+			teachers: ["short"],
+			subjects: ["name", "short"],
+			classes: ["name", "short"],
+			classrooms: ["name", "short"],
+		};
+		if (options.includeStudents) neededPart.students = ["firstname", "lastname"];
+
 		const data = (await this.ascCall(credentials, "/rpr/server/maindbi.js", "mainDBIAccessor", [
 			year,
 			{ vt_filter: { datefrom, dateto } },
-			{
-				op: "fetch",
-				needed_part: {
-					teachers: ["short"],
-					subjects: ["name", "short"],
-					classes: ["name", "short"],
-					classrooms: ["name", "short"],
-				},
-				needed_combos: {},
-			},
+			{ op: "fetch", needed_part: neededPart, needed_combos: {} },
 		])) as { r?: { tables?: RawDbiTable[] } };
 
-		const lookup: NameLookup = { teachers: {}, subjects: {}, classes: {}, classrooms: {} };
+		const lookup: NameLookup = { teachers: {}, subjects: {}, classes: {}, classrooms: {}, students: {} };
 		for (const table of data.r?.tables ?? []) {
 			const target = (lookup as unknown as Record<string, Record<string, string> | undefined>)[table.id];
 			if (!target) continue;
 			for (const row of table.data_rows ?? []) {
-				target[row.id] = row.name || row.short || row.id;
+				const fullName = [row.firstname, row.lastname].filter(Boolean).join(" ");
+				target[row.id] = fullName || row.name || row.short || row.id;
 			}
 		}
 		return lookup;
+	}
+
+	/**
+	 * Generischer POST an `/gcall`, das Legacy-AJAX-Postback-System hinter
+	 * z. B. der Anwesenheits-Ansicht. `gpid` adressiert eine zuvor per Seiten-
+	 * abruf erzeugte Server-Instanz eines UI-Widgets (siehe getGpid), die
+	 * ihren eigenen Zustand (z. B. gewählte Klasse) hält - anders als das
+	 * __func/__args-Muster ist das hier zustandsbehaftet.
+	 */
+	private async gcall(
+		credentials: EdupageCredentials,
+		gpid: string,
+		action: string,
+		extraParams: Record<string, string> = {},
+	): Promise<string> {
+		const baseUrl = this.buildBaseUrl(credentials.domain);
+		const session = await this.ensureSession(credentials);
+		const params = new URLSearchParams({ gpid, gsh: session.gsechash, action, _LJSL: "0" });
+		for (const [key, value] of Object.entries(extraParams)) params.set(key, value);
+
+		const response = await fetch(`${baseUrl}/gcall`, {
+			method: "POST",
+			headers: { "Content-Type": "application/x-www-form-urlencoded", Cookie: session.cookie },
+			body: params.toString(),
+		});
+		if (!response.ok) {
+			throw new Error(`Edupage-gcall fehlgeschlagen: ${response.status} ${response.statusText}`);
+		}
+		return response.text();
+	}
+
+	/**
+	 * Lädt eine Dashboard-Seite und liest die `gpid` (Gadget-Instanz-ID, z. B.
+	 * aus `<div id="gip19737901" ...>`) heraus, die für nachfolgende
+	 * `gcall`-Aufrufe an dieses Widget gebraucht wird.
+	 */
+	private async getGpid(credentials: EdupageCredentials, path: string): Promise<string> {
+		const baseUrl = this.buildBaseUrl(credentials.domain);
+		const session = await this.ensureSession(credentials);
+		const response = await fetch(`${baseUrl}${path}`, { headers: { Cookie: session.cookie } });
+		const html = await response.text();
+		const match = html.match(/id=["']gip(\d+)["']/);
+		if (!match) {
+			throw new Error(
+				`Konnte keine Gadget-ID (gpid) auf "${path}" finden. Entweder hat Edupage das Seitenlayout ` +
+					"geändert, oder dieses Modul ist für den Account nicht verfügbar/aktiviert.",
+			);
+		}
+		return match[1];
+	}
+
+	/**
+	 * Schüler-Anwesenheit für eine Woche (und optional eine bestimmte Klasse -
+	 * ohne Angabe bleibt die zuletzt/serverseitig vorausgewählte Klasse
+	 * aktiv, i. d. R. die eigene Klasse). Anders als der Stundenplan läuft
+	 * das nicht über __func/__args, sondern über das ältere /gcall-
+	 * Postback-System: Seite laden -> gpid auslesen -> ggf. Klasse wechseln
+	 * -> Woche anfragen -> Antwort ist ein `"JS:"`-Skript, das u. a. zwei
+	 * `ASC.json_dc(...)`-kodierte Datenblöcke enthält (Namens-Cache + die
+	 * eigentlichen Zellen). Namen (Schüler/Fach/Lehrkraft) werden separat
+	 * über getNameLookup aufgelöst statt aus dem Namens-Cache, da dieser
+	 * unklarer strukturiert ist.
+	 */
+	async getAttendance(
+		credentials: EdupageCredentials,
+		weekDate: string,
+		classId?: string,
+	): Promise<{ items: AttendanceItem[] }> {
+		const gpid = await this.getGpid(credentials, "/dashboard/eb.php?mode=attendance");
+
+		if (classId) {
+			await this.gcall(credentials, gpid, "refresh", { table: "classes", id: classId });
+		}
+		const responseText = await this.gcall(credentials, gpid, "refresh", { date: weekDate });
+
+		const payloads = extractJsonDcPayloads(responseText);
+		if (payloads.length === 0) {
+			throw new Error(
+				"Die Antwort der Anwesenheits-Ansicht enthielt keine erkennbaren Daten. Möglich: Edupage hat das " +
+					"Antwortformat geändert, oder für diese Woche/Klasse ist nichts hinterlegt.",
+			);
+		}
+		const cellData = decodeJsonDc(payloads[payloads.length - 1]) as {
+			students?: Record<string, Record<string, Record<string, RawAttendanceCell>>>;
+		};
+
+		// Der erste json_dc-Block (falls vorhanden) ist der Namens-/Referenz-
+		// Cache dieser Ansicht und enthält u. a. die Klartexte für
+		// studentabsent_typeid (z. B. "-9" -> "Entschuldigte Stunden").
+		let absentTypes: Record<string, string> = {};
+		if (payloads.length > 1) {
+			const refData = decodeJsonDc(payloads[0]) as {
+				studentabsent_types?: Record<string, { name?: string; short?: string }>;
+			};
+			for (const [id, info] of Object.entries(refData.studentabsent_types ?? {})) {
+				absentTypes[id] = info.name || info.short || id;
+			}
+		}
+
+		const lookup = await this.getNameLookup(credentials, weekDate, weekDate, { includeStudents: true });
+
+		const items: AttendanceItem[] = [];
+		for (const [studentId, byDate] of Object.entries(cellData.students ?? {})) {
+			for (const [date, byPeriod] of Object.entries(byDate)) {
+				for (const [period, cell] of Object.entries(byPeriod)) {
+					items.push({
+						date,
+						period,
+						student: lookup.students[studentId] ?? studentId,
+						presence: presenceLabel(cell.presence),
+						absentType: cell.studentabsent_typeid ? (absentTypes[cell.studentabsent_typeid] ?? cell.studentabsent_typeid) : undefined,
+						subject: cell.subjectid ? (lookup.subjects[cell.subjectid] ?? cell.subjectid) : undefined,
+						teachers: resolveNames(cell.teacherids, lookup.teachers),
+						note: cell.note || undefined,
+					});
+				}
+			}
+		}
+		items.sort((a, b) => (a.date + a.period).localeCompare(b.date + b.period));
+		return { items };
 	}
 
 	/** Escape-Hatch für Edupage-Endpunkte außerhalb des __func/__args-Musters. */

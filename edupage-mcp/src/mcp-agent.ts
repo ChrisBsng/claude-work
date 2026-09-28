@@ -84,6 +84,29 @@ export class EdupageMcpAgent extends McpAgent<Env> {
 		);
 
 		this.server.tool(
+			"edupage_get_attendance",
+			"Liefert die Schüler-Anwesenheit (anwesend/abwesend/verspätet/entschuldigt je Schüler, Datum und " +
+				"Stunde) für eine Woche - der Bereich 'Unterricht -> Schüler-Abwesenheit'. Ohne classId bleibt die " +
+				"zuletzt/serverseitig vorausgewählte Klasse aktiv (meist die eigene Klasse).",
+			{
+				...credentialsShape,
+				date: z.string().describe("Ein beliebiges Datum (YYYY-MM-DD) innerhalb der gewünschten Woche"),
+				classId: z
+					.string()
+					.optional()
+					.describe(
+						"Interne Edupage-Klassen-ID (z. B. \"-461\"), zu finden über edupage_get_timetable's classes-Feld " +
+							"oder edupage_raw_call auf mainDBIAccessor. Ohne Angabe: zuletzt gewählte/eigene Klasse.",
+					),
+			},
+			async ({ date, classId, ...credentials }: EdupageCredentials & { date: string; classId?: string }) => {
+				const session = await this.sessionFor(credentials.domain, credentials.username);
+				const data = await session.getAttendance(credentials, date, classId);
+				return { content: [{ type: "text" as const, text: JSON.stringify(data) }] };
+			},
+		);
+
+		this.server.tool(
 			"edupage_raw_call",
 			"Escape-Hatch: ruft eine beliebige interne Edupage-RPC-Funktion auf (__func/__args-Muster). Damit " +
 				"lassen sich weitere Bereiche (Hausaufgaben, Noten, Nachrichten, ...) anbinden, ohne den Server neu " +
