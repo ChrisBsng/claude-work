@@ -1,0 +1,20 @@
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "pausen-checkin",
+	"main": "src/index.ts",
+	"compatibility_date": "2026-09-28",
+	"observability": {
+		"enabled": true
+	},
+	"assets": {
+		"directory": "./public",
+		"binding": "ASSETS"
+	},
+	"d1_databases": [
+		{
+			"binding": "DB",
+			"database_name": "pausen-checkin-db",
+			"database_id": "f18451a0-0b28-438f-9f34-089cf94d6ba0"
+		}
+	]
+}

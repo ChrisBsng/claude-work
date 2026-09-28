@@ -1,0 +1,17 @@
+{
+	"name": "pausen-checkin",
+	"private": true,
+	"version": "0.1.0",
+	"scripts": {
+		"dev": "wrangler dev",
+		"deploy": "wrangler deploy",
+		"db:migrations:apply:local": "wrangler d1 migrations apply pausen-checkin-db --local",
+		"db:migrations:apply:remote": "wrangler d1 migrations apply pausen-checkin-db --remote",
+		"cf-typegen": "wrangler types"
+	},
+	"devDependencies": {
+		"@cloudflare/workers-types": "^4.20260928.0",
+		"typescript": "^5.7.0",
+		"wrangler": "^4.20.0"
+	}
+}
