@@ -70,12 +70,31 @@ export interface TimetableItem {
 	start: string;
 	end: string;
 	period?: string;
-	subjectId?: string;
-	classIds?: string[];
-	teacherIds?: string[];
-	roomIds?: string[];
+	subject?: string;
+	classes?: string[];
+	teachers?: string[];
+	rooms?: string[];
 	allDay?: boolean;
 	cancelled?: boolean;
+}
+
+/** id -> Name/Abkürzung, je eine Tabelle pro Kategorie (siehe getNameLookup). */
+export interface NameLookup {
+	teachers: Record<string, string>;
+	subjects: Record<string, string>;
+	classes: Record<string, string>;
+	classrooms: Record<string, string>;
+}
+
+/** Rohe Antwortform von mainDBIAccessor (nur die hier genutzten Felder). */
+interface RawDbiRow {
+	id: string;
+	name?: string;
+	short?: string;
+}
+interface RawDbiTable {
+	id: string;
+	data_rows?: RawDbiRow[];
 }
 
 /** Erste lesbare Kopfzeile aus dpRow.header, z. B. "BEE32A · EEA" für eine Stunde. */
@@ -87,15 +106,22 @@ function headerText(header?: RawTimetableHeaderEntry[]): string | undefined {
 	return undefined;
 }
 
+function resolveNames(ids: string[] | undefined, table: Record<string, string>): string[] | undefined {
+	if (!ids || ids.length === 0) return undefined;
+	return ids.map((id) => table[id] ?? id);
+}
+
 /**
  * Reduziert einen rohen curentttGetData-Eintrag auf die für Menschen (bzw.
- * ein LLM) relevanten Felder. Die Rohantwort trägt pro Eintrag komplette
+ * ein LLM) relevanten Felder und löst Fach-/Klassen-/Lehrkraft-/Raum-IDs
+ * über `lookup` in Klarnamen auf. Die Rohantwort trägt pro Eintrag komplette
  * UI-Menüs, Schülerlisten, Feld-Definitionen usw. mit - unnötig groß für
  * den normalen "was steht heute an"-Anwendungsfall.
  */
-function simplifyTimetableItem(raw: RawTimetableItem): TimetableItem {
+function simplifyTimetableItem(raw: RawTimetableItem, lookup: NameLookup): TimetableItem {
 	const isLesson = raw.dpRow?.type === "lesson";
 	const flags = raw.dpRow?.flags?.dp0;
+	const subjectId = raw.subjectid || undefined;
 	return {
 		date: raw.date ?? "",
 		type: isLesson ? "lesson" : "event",
@@ -103,10 +129,10 @@ function simplifyTimetableItem(raw: RawTimetableItem): TimetableItem {
 		start: raw.starttime ?? "",
 		end: raw.endtime ?? "",
 		period: flags?.period || raw.uniperiod || undefined,
-		subjectId: raw.subjectid || undefined,
-		classIds: raw.classids?.length ? raw.classids : undefined,
-		teacherIds: raw.teacherids?.length ? raw.teacherids : undefined,
-		roomIds: raw.classroomids?.length ? raw.classroomids : undefined,
+		subject: subjectId ? (lookup.subjects[subjectId] ?? subjectId) : undefined,
+		classes: resolveNames(raw.classids, lookup.classes),
+		teachers: resolveNames(raw.teacherids, lookup.teachers),
+		rooms: resolveNames(raw.classroomids, lookup.classrooms),
 		allDay: flags?.allday,
 		cancelled: flags?.cancelled,
 	};
@@ -273,10 +299,49 @@ export class EdupageSessionDO extends DurableObject<Env> {
 			args.id = roleMatch[2];
 		}
 
-		const data = (await this.ascCall(credentials, "/timetable/server/currenttt.js", "curentttGetData", [args])) as {
-			r?: { ttitems?: RawTimetableItem[] };
-		};
-		return { items: (data.r?.ttitems ?? []).map(simplifyTimetableItem) };
+		const [data, lookup] = await Promise.all([
+			this.ascCall(credentials, "/timetable/server/currenttt.js", "curentttGetData", [args]) as Promise<{
+				r?: { ttitems?: RawTimetableItem[] };
+			}>,
+			this.getNameLookup(credentials, datefrom, dateto),
+		]);
+		return { items: (data.r?.ttitems ?? []).map((raw) => simplifyTimetableItem(raw, lookup)) };
+	}
+
+	/**
+	 * Löst Lehrkraft-/Fach-/Klassen-/Raum-IDs in Klarnamen auf, über die
+	 * interne `mainDBIAccessor`-RPC (Pfad `/rpr/server/maindbi.js`) -
+	 * dieselbe Datenquelle, aus der Edupages eigenes Frontend die Namen für
+	 * die Stundenplan-Ansicht zieht. Für Lehrkräfte wird nur `short`
+	 * (Kürzel) angefragt, nicht der volle Name - das ist bereits die
+	 * Darstellung, die Edupage selbst im Stundenplan verwendet.
+	 */
+	async getNameLookup(credentials: EdupageCredentials, datefrom: string, dateto: string): Promise<NameLookup> {
+		const year = Number(datefrom.slice(0, 4));
+		const data = (await this.ascCall(credentials, "/rpr/server/maindbi.js", "mainDBIAccessor", [
+			year,
+			{ vt_filter: { datefrom, dateto } },
+			{
+				op: "fetch",
+				needed_part: {
+					teachers: ["short"],
+					subjects: ["name", "short"],
+					classes: ["name", "short"],
+					classrooms: ["name", "short"],
+				},
+				needed_combos: {},
+			},
+		])) as { r?: { tables?: RawDbiTable[] } };
+
+		const lookup: NameLookup = { teachers: {}, subjects: {}, classes: {}, classrooms: {} };
+		for (const table of data.r?.tables ?? []) {
+			const target = (lookup as unknown as Record<string, Record<string, string> | undefined>)[table.id];
+			if (!target) continue;
+			for (const row of table.data_rows ?? []) {
+				target[row.id] = row.name || row.short || row.id;
+			}
+		}
+		return lookup;
 	}
 
 	/** Escape-Hatch für Edupage-Endpunkte außerhalb des __func/__args-Musters. */
