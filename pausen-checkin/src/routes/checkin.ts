@@ -1,6 +1,6 @@
 import { Router, type IRequest } from "itty-router";
 import type { Env } from "../env";
-import { computeBreakBudgetFromEvents, fetchRecentParticipantEvents } from "../breakBudget";
+import { computeBreakBudgetFromEvents, fetchRecentParticipantEvents, type BreakBudgetResult } from "../breakBudget";
 import { randomToken } from "../crypto";
 import { renderQrCodeSvg } from "../qrcode";
 
@@ -35,9 +35,19 @@ async function getParticipantByToken(db: D1Database, courseId: number, accessTok
 		.first<ParticipantRow>();
 }
 
-async function participantBudget(db: D1Database, participant: ParticipantRow, course: CourseRow) {
+// Der tatsächlich angezeigte Status kommt immer frisch aus dem Event-Log
+// (tagesbezogen), nicht aus der ggf. seit gestern veralteten Spalte
+// participants.status – so ist eine vergessene Pause am nächsten Tag
+// automatisch wieder "anwesend" statt hängenzubleiben.
+async function loadParticipantView(
+	db: D1Database,
+	participant: ParticipantRow,
+	course: CourseRow,
+): Promise<{ participant: ParticipantRow; budget: BreakBudgetResult }> {
 	const events = await fetchRecentParticipantEvents(db, participant.id);
-	return computeBreakBudgetFromEvents(events, course.daily_break_budget_minutes, course.timezone);
+	const budget = computeBreakBudgetFromEvents(events, course.daily_break_budget_minutes, course.timezone);
+	const status: ParticipantRow["status"] = budget.isOnBreakNow ? "on_break" : "present";
+	return { participant: { ...participant, status }, budget };
 }
 
 export const checkinRouter = Router({ base: "/api/checkin" });
@@ -89,11 +99,7 @@ checkinRouter.post("/:checkinCode/register", async (request: IRequest, env: Env)
 		.bind(participant!.id, course.id)
 		.run();
 
-	return Response.json({
-		accessToken,
-		participant: participant!,
-		budget: await participantBudget(env.DB, participant!, course),
-	});
+	return Response.json({ accessToken, ...(await loadParticipantView(env.DB, participant!, course)) });
 });
 
 checkinRouter.get("/:checkinCode/me", async (request: IRequest, env: Env) => {
@@ -112,7 +118,7 @@ checkinRouter.get("/:checkinCode/me", async (request: IRequest, env: Env) => {
 		return Response.json({ error: "Teilnehmer nicht gefunden" }, { status: 404 });
 	}
 
-	return Response.json({ participant, budget: await participantBudget(env.DB, participant, course) });
+	return Response.json(await loadParticipantView(env.DB, participant, course));
 });
 
 checkinRouter.post("/:checkinCode/toggle", async (request: IRequest, env: Env) => {
@@ -131,7 +137,11 @@ checkinRouter.post("/:checkinCode/toggle", async (request: IRequest, env: Env) =
 		return Response.json({ error: "Teilnehmer nicht gefunden" }, { status: 404 });
 	}
 
-	const newStatus = participant.status === "present" ? "on_break" : "present";
+	// Richtung des Toggles anhand des tagesbezogenen, aus dem Event-Log
+	// abgeleiteten Status bestimmen – nicht anhand der möglicherweise
+	// seit gestern veralteten participants.status-Spalte.
+	const before = await loadParticipantView(env.DB, participant, course);
+	const newStatus = before.participant.status === "present" ? "on_break" : "present";
 	const eventType = newStatus === "on_break" ? "check_out" : "check_in";
 
 	await env.DB.batch([
@@ -146,9 +156,5 @@ checkinRouter.post("/:checkinCode/toggle", async (request: IRequest, env: Env) =
 		),
 	]);
 
-	const updatedParticipant: ParticipantRow = { ...participant, status: newStatus };
-	return Response.json({
-		participant: updatedParticipant,
-		budget: await participantBudget(env.DB, updatedParticipant, course),
-	});
+	return Response.json(await loadParticipantView(env.DB, participant, course));
 });

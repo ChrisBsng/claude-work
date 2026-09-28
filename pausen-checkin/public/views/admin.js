@@ -17,7 +17,7 @@ function clearToken() {
 export function renderAdmin(root) {
 	const token = getToken();
 	if (token) {
-		renderDashboard(root, token);
+		renderCourses(root, token);
 	} else {
 		renderLogin(root);
 	}
@@ -42,7 +42,7 @@ function renderLogin(root, message) {
 		try {
 			const { token } = await api.adminLogin(password);
 			setToken(token);
-			renderDashboard(root, token);
+			renderCourses(root, token);
 		} catch (error) {
 			renderLogin(root, error.message);
 		}
@@ -60,41 +60,99 @@ async function copyToClipboard(text, button) {
 		button.textContent = "Kopiert!";
 		setTimeout(() => (button.textContent = original), 1500);
 	} catch {
-		// Zwischenablage evtl. nicht verfügbar (z. B. kein HTTPS-Kontext) – kein Fehler, den Link zeigen wir ohnehin an.
+		// Zwischenablage evtl. nicht verfügbar – kein Fehler, der Link steht ja als Text da.
 	}
 }
 
-function courseCard(course) {
-	const dashboardUrl = courseUrl(`/d/${course.dashboardToken}`);
-	const checkinUrl = courseUrl(`/k/${course.checkinCode}`);
-	const wrapper = document.createElement("div");
-	wrapper.className = "card";
-	wrapper.innerHTML = `
-		<h2>${course.name}</h2>
-		<p class="muted">
-			Start: ${course.startDate} · Laufzeit: ${course.durationDays} Tag(e) ·
-			Tägl. Pausenbudget: ${course.dailyBreakBudgetMinutes} Min.
-		</p>
-		<div class="link-row">
-			<strong>Dashboard:</strong>
-			<code>${dashboardUrl}</code>
-			<button type="button" class="secondary" data-copy="${dashboardUrl}">Kopieren</button>
-			<a href="${dashboardUrl}" target="_blank" rel="noopener">Öffnen</a>
-		</div>
-		<div class="link-row">
-			<strong>Check-in:</strong>
-			<code>${checkinUrl}</code>
-			<button type="button" class="secondary" data-copy="${checkinUrl}">Kopieren</button>
-			<a href="${checkinUrl}" target="_blank" rel="noopener">Öffnen</a>
-		</div>
-	`;
-	wrapper.querySelectorAll("[data-copy]").forEach((button) => {
-		button.addEventListener("click", () => copyToClipboard(button.dataset.copy, button));
-	});
-	return wrapper;
+async function downloadExport(token, course) {
+	const blob = await api.exportCourseXlsxBlob(token, course.id);
+	const url = URL.createObjectURL(blob);
+	const link = document.createElement("a");
+	link.href = url;
+	link.download = `${course.name.replace(/[^\p{L}\p{N}\- ]+/gu, "").trim() || "kurs"}.xlsx`;
+	document.body.appendChild(link);
+	link.click();
+	link.remove();
+	URL.revokeObjectURL(url);
 }
 
-async function renderDashboard(root, token) {
+function formatMinutes(minutes) {
+	const h = Math.floor(minutes / 60);
+	const m = minutes % 60;
+	return h > 0 ? `${h} h ${m} min` : `${m} min`;
+}
+
+async function renderReportPanel(container, token, course) {
+	container.innerHTML = `<p class="muted">Lädt Statistik…</p>`;
+	try {
+		const stats = await api.getCourseStats(token, course.id);
+		container.innerHTML = `
+			<p class="muted">
+				${stats.participantCount} Teilnehmer(in) · Gesamt-Pausenzeit bisher: ${formatMinutes(stats.totalBreakMinutes)}
+			</p>
+			<button type="button" id="export-btn">Als Excel (.xlsx) exportieren</button>
+		`;
+		container.querySelector("#export-btn").addEventListener("click", async (event) => {
+			const button = event.target;
+			button.disabled = true;
+			button.textContent = "Erzeuge Datei…";
+			try {
+				await downloadExport(token, course);
+			} finally {
+				button.disabled = false;
+				button.textContent = "Als Excel (.xlsx) exportieren";
+			}
+		});
+	} catch (error) {
+		container.innerHTML = `<p class="error">${error.message}</p>`;
+	}
+}
+
+function courseRow(course, token, onSelectionChange) {
+	const dashboardUrl = courseUrl(`/d/${course.dashboardToken}`);
+	const checkinUrl = courseUrl(`/k/${course.checkinCode}`);
+
+	const tr = document.createElement("tr");
+	tr.innerHTML = `
+		<td><input type="checkbox" class="row-select" /></td>
+		<td>
+			<strong>${course.name}</strong>
+			<div class="muted">Start: ${course.startDate} · Laufzeit: ${course.durationDays} Tag(e) · Pausenbudget: ${course.dailyBreakBudgetMinutes} Min./Tag</div>
+			<div class="link-row">
+				<code>${dashboardUrl}</code>
+				<button type="button" class="secondary" data-copy="${dashboardUrl}">Dashboard kopieren</button>
+				<a href="${dashboardUrl}" target="_blank" rel="noopener">Öffnen</a>
+			</div>
+			<div class="link-row">
+				<code>${checkinUrl}</code>
+				<button type="button" class="secondary" data-copy="${checkinUrl}">Check-in kopieren</button>
+				<a href="${checkinUrl}" target="_blank" rel="noopener">Öffnen</a>
+			</div>
+			<button type="button" class="secondary" data-toggle-report>Report / Statistik</button>
+			<div class="card" data-report hidden style="margin-top: 10px;"></div>
+		</td>
+	`;
+
+	tr.querySelector(".row-select").addEventListener("change", onSelectionChange);
+	tr.querySelectorAll("[data-copy]").forEach((button) => {
+		button.addEventListener("click", () => copyToClipboard(button.dataset.copy, button));
+	});
+
+	const reportPanel = tr.querySelector("[data-report]");
+	tr.querySelector("[data-toggle-report]").addEventListener("click", async () => {
+		const isHidden = reportPanel.hasAttribute("hidden");
+		if (isHidden) {
+			reportPanel.removeAttribute("hidden");
+			await renderReportPanel(reportPanel, token, course);
+		} else {
+			reportPanel.setAttribute("hidden", "");
+		}
+	});
+
+	return tr;
+}
+
+async function renderCourses(root, token) {
 	root.innerHTML = `
 		<nav class="top">
 			<h1>Admin-Bereich</h1>
@@ -119,6 +177,12 @@ async function renderDashboard(root, token) {
 		</div>
 
 		<h2>Bestehende Kurse</h2>
+		<div class="link-row" id="bulk-bar" hidden>
+			<strong><span id="selected-count">0</span> ausgewählt</strong>
+			<button type="button" id="bulk-delete" class="secondary" style="color: var(--color-danger); border-color: var(--color-danger);">
+				Endgültig löschen
+			</button>
+		</div>
 		<div id="course-list"><p class="muted">Lädt…</p></div>
 	`;
 
@@ -126,6 +190,15 @@ async function renderDashboard(root, token) {
 		clearToken();
 		renderLogin(root);
 	});
+
+	function handleAuthError(error) {
+		if (error.status === 401) {
+			clearToken();
+			renderLogin(root, "Sitzung abgelaufen, bitte erneut anmelden.");
+			return true;
+		}
+		return false;
+	}
 
 	root.querySelector("#course-form").addEventListener("submit", async (event) => {
 		event.preventDefault();
@@ -140,13 +213,37 @@ async function renderDashboard(root, token) {
 			event.target.reset();
 			await loadCourses();
 		} catch (error) {
-			if (error.status === 401) {
-				clearToken();
-				renderLogin(root, "Sitzung abgelaufen, bitte erneut anmelden.");
-				return;
-			}
+			if (handleAuthError(error)) return;
 			errorBox.textContent = error.message;
 			errorBox.className = "error";
+		}
+	});
+
+	function updateBulkBar() {
+		const checked = root.querySelectorAll(".row-select:checked");
+		const bar = root.querySelector("#bulk-bar");
+		root.querySelector("#selected-count").textContent = checked.length;
+		bar.hidden = checked.length === 0;
+	}
+
+	root.querySelector("#bulk-delete").addEventListener("click", async () => {
+		const rows = [...root.querySelectorAll("#course-table tbody tr")];
+		const selectedIds = rows
+			.filter((row) => row.querySelector(".row-select").checked)
+			.map((row) => Number(row.dataset.courseId));
+
+		if (selectedIds.length === 0) return;
+		const confirmed = window.confirm(
+			`${selectedIds.length} Kurs(e) inkl. aller Teilnehmerdaten endgültig löschen? Das kann nicht rückgängig gemacht werden.`,
+		);
+		if (!confirmed) return;
+
+		try {
+			await api.bulkDeleteCourses(token, selectedIds);
+			await loadCourses();
+		} catch (error) {
+			if (handleAuthError(error)) return;
+			window.alert(error.message);
 		}
 	});
 
@@ -154,18 +251,40 @@ async function renderDashboard(root, token) {
 		const list = root.querySelector("#course-list");
 		try {
 			const { courses } = await api.adminListCourses(token);
-			list.innerHTML = "";
 			if (courses.length === 0) {
 				list.innerHTML = '<p class="muted">Noch keine Kurse angelegt.</p>';
+				root.querySelector("#bulk-bar").hidden = true;
 				return;
 			}
-			courses.forEach((course) => list.appendChild(courseCard(course)));
+
+			const table = document.createElement("table");
+			table.id = "course-table";
+			table.innerHTML = `
+				<thead>
+					<tr>
+						<th><input type="checkbox" id="select-all" /></th>
+						<th>Kurs</th>
+					</tr>
+				</thead>
+				<tbody></tbody>
+			`;
+			const tbody = table.querySelector("tbody");
+			courses.forEach((course) => {
+				const row = courseRow(course, token, updateBulkBar);
+				row.dataset.courseId = course.id;
+				tbody.appendChild(row);
+			});
+
+			list.innerHTML = "";
+			list.appendChild(table);
+
+			table.querySelector("#select-all").addEventListener("change", (event) => {
+				tbody.querySelectorAll(".row-select").forEach((checkbox) => (checkbox.checked = event.target.checked));
+				updateBulkBar();
+			});
+			updateBulkBar();
 		} catch (error) {
-			if (error.status === 401) {
-				clearToken();
-				renderLogin(root, "Sitzung abgelaufen, bitte erneut anmelden.");
-				return;
-			}
+			if (handleAuthError(error)) return;
 			list.innerHTML = `<p class="error">${error.message}</p>`;
 		}
 	}
