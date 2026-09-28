@@ -13,11 +13,14 @@ export default {
 	async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
 		const url = new URL(request.url);
 
+		// McpAgent.serve()/.serveSSE() default to looking up a Durable Object
+		// binding literally named "MCP_OBJECT" - ours is "MCP_AGENT" (see
+		// wrangler.jsonc), so it must be passed explicitly here.
 		if (url.pathname === "/sse" || url.pathname === "/sse/message") {
-			return EdupageMcpAgent.serveSSE("/sse").fetch(request, env, ctx);
+			return EdupageMcpAgent.serveSSE("/sse", { binding: "MCP_AGENT" }).fetch(request, env, ctx);
 		}
 		if (url.pathname === "/mcp") {
-			return EdupageMcpAgent.serve("/mcp").fetch(request, env, ctx);
+			return EdupageMcpAgent.serve("/mcp", { binding: "MCP_AGENT" }).fetch(request, env, ctx);
 		}
 
 		return new Response(
