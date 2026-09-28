@@ -16,5 +16,8 @@
 		"@cloudflare/workers-types": "^5.20260928.1",
 		"typescript": "^5.7.0",
 		"wrangler": "^4.142.0"
+	},
+	"dependencies": {
+		"itty-router": "^5.0.24"
 	}
 }

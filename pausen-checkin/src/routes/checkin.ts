@@ -1,0 +1,137 @@
+import { Router, type IRequest } from "itty-router";
+import type { Env } from "../env";
+import { computeBreakBudgetFromEvents, fetchRecentParticipantEvents } from "../breakBudget";
+import { randomToken } from "../crypto";
+
+const PARTICIPANT_TOKEN_BYTES = 20;
+
+interface CourseRow {
+	id: number;
+	name: string;
+	daily_break_budget_minutes: number;
+	timezone: string;
+	is_active: number;
+}
+
+interface ParticipantRow {
+	id: number;
+	name: string;
+	status: "present" | "on_break";
+}
+
+async function getActiveCourseByCheckinCode(db: D1Database, checkinCode: string): Promise<CourseRow | null> {
+	const course = await db
+		.prepare("SELECT id, name, daily_break_budget_minutes, timezone, is_active FROM courses WHERE checkin_code = ?1")
+		.bind(checkinCode)
+		.first<CourseRow>();
+	return course && course.is_active ? course : null;
+}
+
+async function getParticipantByToken(db: D1Database, courseId: number, accessToken: string): Promise<ParticipantRow | null> {
+	return db
+		.prepare("SELECT id, name, status FROM participants WHERE course_id = ?1 AND access_token = ?2")
+		.bind(courseId, accessToken)
+		.first<ParticipantRow>();
+}
+
+async function participantBudget(db: D1Database, participant: ParticipantRow, course: CourseRow) {
+	const events = await fetchRecentParticipantEvents(db, participant.id);
+	return computeBreakBudgetFromEvents(events, course.daily_break_budget_minutes, course.timezone);
+}
+
+export const checkinRouter = Router({ base: "/api/checkin" });
+
+checkinRouter.get("/:checkinCode", async (request: IRequest, env: Env) => {
+	const course = await getActiveCourseByCheckinCode(env.DB, request.params.checkinCode);
+	if (!course) {
+		return Response.json({ error: "Kurs nicht gefunden" }, { status: 404 });
+	}
+	return Response.json({ course: { name: course.name, dailyBreakBudgetMinutes: course.daily_break_budget_minutes } });
+});
+
+checkinRouter.post("/:checkinCode/register", async (request: IRequest, env: Env) => {
+	const course = await getActiveCourseByCheckinCode(env.DB, request.params.checkinCode);
+	if (!course) {
+		return Response.json({ error: "Kurs nicht gefunden" }, { status: 404 });
+	}
+
+	const body = (await request.json().catch(() => null)) as { name?: string } | null;
+	const name = body?.name?.trim();
+	if (!name) {
+		return Response.json({ error: "Name ist erforderlich" }, { status: 400 });
+	}
+
+	const accessToken = randomToken(PARTICIPANT_TOKEN_BYTES);
+	const participant = await env.DB.prepare(
+		"INSERT INTO participants (course_id, name, access_token) VALUES (?1, ?2, ?3) RETURNING id, name, status",
+	)
+		.bind(course.id, name, accessToken)
+		.first<ParticipantRow>();
+
+	await env.DB.prepare("INSERT INTO checkin_events (participant_id, course_id, event_type) VALUES (?1, ?2, 'check_in')")
+		.bind(participant!.id, course.id)
+		.run();
+
+	return Response.json({
+		accessToken,
+		participant: participant!,
+		budget: await participantBudget(env.DB, participant!, course),
+	});
+});
+
+checkinRouter.get("/:checkinCode/me", async (request: IRequest, env: Env) => {
+	const course = await getActiveCourseByCheckinCode(env.DB, request.params.checkinCode);
+	if (!course) {
+		return Response.json({ error: "Kurs nicht gefunden" }, { status: 404 });
+	}
+
+	const accessToken = request.headers.get("X-Access-Token");
+	if (!accessToken) {
+		return Response.json({ error: "Kein Zugriffs-Token" }, { status: 401 });
+	}
+
+	const participant = await getParticipantByToken(env.DB, course.id, accessToken);
+	if (!participant) {
+		return Response.json({ error: "Teilnehmer nicht gefunden" }, { status: 404 });
+	}
+
+	return Response.json({ participant, budget: await participantBudget(env.DB, participant, course) });
+});
+
+checkinRouter.post("/:checkinCode/toggle", async (request: IRequest, env: Env) => {
+	const course = await getActiveCourseByCheckinCode(env.DB, request.params.checkinCode);
+	if (!course) {
+		return Response.json({ error: "Kurs nicht gefunden" }, { status: 404 });
+	}
+
+	const accessToken = request.headers.get("X-Access-Token");
+	if (!accessToken) {
+		return Response.json({ error: "Kein Zugriffs-Token" }, { status: 401 });
+	}
+
+	const participant = await getParticipantByToken(env.DB, course.id, accessToken);
+	if (!participant) {
+		return Response.json({ error: "Teilnehmer nicht gefunden" }, { status: 404 });
+	}
+
+	const newStatus = participant.status === "present" ? "on_break" : "present";
+	const eventType = newStatus === "on_break" ? "check_out" : "check_in";
+
+	await env.DB.batch([
+		env.DB.prepare("UPDATE participants SET status = ?1, status_changed_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?2").bind(
+			newStatus,
+			participant.id,
+		),
+		env.DB.prepare("INSERT INTO checkin_events (participant_id, course_id, event_type) VALUES (?1, ?2, ?3)").bind(
+			participant.id,
+			course.id,
+			eventType,
+		),
+	]);
+
+	const updatedParticipant: ParticipantRow = { ...participant, status: newStatus };
+	return Response.json({
+		participant: updatedParticipant,
+		budget: await participantBudget(env.DB, updatedParticipant, course),
+	});
+});

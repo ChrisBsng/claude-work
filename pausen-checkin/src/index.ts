@@ -1,16 +1,18 @@
-export interface Env {
-	DB: D1Database;
-	ASSETS: Fetcher;
-}
+import { Router } from "itty-router";
+import type { Env } from "./env";
+import { adminRouter } from "./routes/admin";
+import { checkinRouter } from "./routes/checkin";
+import { dashboardRouter } from "./routes/dashboard";
+
+const router = Router();
+
+router.get("/api/health", () => Response.json({ status: "ok" }));
+router.all("/api/admin/*", adminRouter.fetch);
+router.all("/api/checkin/*", checkinRouter.fetch);
+router.all("/api/dashboard/*", dashboardRouter.fetch);
+router.all("/api/*", () => Response.json({ error: "Not found" }, { status: 404 }));
+router.all("*", (request: Request, env: Env) => env.ASSETS.fetch(request));
 
 export default {
-	async fetch(request, env): Promise<Response> {
-		const url = new URL(request.url);
-
-		if (url.pathname === "/api/health") {
-			return Response.json({ status: "ok" });
-		}
-
-		return env.ASSETS.fetch(request);
-	},
+	fetch: (request, env, ctx) => router.fetch(request, env, ctx),
 } satisfies ExportedHandler<Env>;
