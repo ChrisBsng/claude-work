@@ -78,14 +78,7 @@ export class EdupageMcpAgent extends McpAgent<Env> {
 				const from = dateFrom ?? today;
 				const to = dateTo ?? from;
 				const session = await this.sessionFor(credentials.domain, credentials.username);
-				// `year` ist ein Pflichtfeld - ohne es liefert Edupage einen internen
-				// Fehler statt eines leeren/gefüllten Ergebnisses. table/id werden
-				// bewusst weggelassen, damit Edupage serverseitig "meinen eigenen"
-				// Stundenplan aus der Session ableitet (funktioniert für jede
-				// Nutzerrolle - Lehrkraft, Schüler, ...), statt eine Rolle zu raten.
-				const data = await session.ascCall(credentials, "/timetable/server/currenttt.js", "curentttGetData", [
-					{ year: Number(from.slice(0, 4)), datefrom: from, dateto: to },
-				]);
+				const data = await session.getTimetable(credentials, from, to);
 				return { content: [{ type: "text" as const, text: JSON.stringify(data) }] };
 			},
 		);

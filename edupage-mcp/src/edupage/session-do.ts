@@ -11,8 +11,27 @@ interface EdupageSession {
 	cookie: string;
 	gsechash: string;
 	userId?: string;
+	/**
+	 * Interne Kennung des eingeloggten Nutzers, z. B. "Ucitel-184" für eine
+	 * Lehrkraft mit interner ID -184 (Slovak: Ucitel = Lehrer, Ziak =
+	 * Schüler - Edupage stammt aus der Slowakei und nutzt diese Rollen-
+	 * Präfixe intern unabhängig von der UI-Sprache). Wird u. a. gebraucht,
+	 * um beim Stundenplan-Abruf table/id für "meine eigenen Stunden" zu
+	 * bilden (siehe getTimetable).
+	 */
+	loggedUser?: string;
 	loggedInAt: number;
 }
+
+// Bekannte Edupage-Rollenpräfixe -> Tabellenname für curentttGetData.
+// Nur "Ucitel" (Lehrkraft) ist gegen eine echte Instanz verifiziert; die
+// übrigen sind plausible Vermutungen (gleiches Namensschema) und werden
+// nicht garantiert korrekt sein.
+const ROLE_TABLE_MAP: Record<string, string> = {
+	ucitel: "teachers",
+	ziak: "students",
+	student: "students",
+};
 
 interface RawRequestInit {
 	method?: "GET" | "POST";
@@ -101,11 +120,13 @@ export class EdupageSessionDO extends DurableObject<Env> {
 			);
 		}
 		const userIdMatch = html.match(/ASC\.userid\s*=\s*"([^"]*)"/);
+		const loggedUserMatch = html.match(/"loggedUser"\s*:\s*"([^"]*)"/);
 
 		const session: EdupageSession = {
 			cookie,
 			gsechash: gsechashMatch[1],
 			userId: userIdMatch?.[1],
+			loggedUser: loggedUserMatch?.[1],
 			loggedInAt: Date.now(),
 		};
 		this.session = session;
@@ -145,6 +166,37 @@ export class EdupageSessionDO extends DurableObject<Env> {
 			throw new Error(`Edupage-Request fehlgeschlagen: ${response.status} ${response.statusText}`);
 		}
 		return response.json();
+	}
+
+	/**
+	 * Stundenplan für einen Datumsbereich. `curentttGetData` liefert ohne
+	 * `table`/`id` nur schulweite Termine (Feiertage, Ferien, ...), nicht
+	 * die persönlichen Unterrichtsstunden - dafür müssen table/id explizit
+	 * die eigene Rolle+ID tragen (z. B. `table:"teachers", id:"-184"` für
+	 * die Lehrkraft mit interner ID -184, aus `loggedUser:"Ucitel-184"`
+	 * abgeleitet). Für unbekannte Rollenpräfixe werden table/id weggelassen
+	 * (liefert dann nur die schulweiten Termine).
+	 */
+	async getTimetable(credentials: EdupageCredentials, datefrom: string, dateto: string): Promise<unknown> {
+		const session = await this.ensureSession(credentials);
+		const args: Record<string, unknown> = {
+			year: Number(datefrom.slice(0, 4)),
+			datefrom,
+			dateto,
+			showColors: true,
+			showIgroupsInClasses: false,
+			showOrig: true,
+			log_module: "CurrentTTView",
+		};
+
+		const roleMatch = session.loggedUser?.match(/^([A-Za-z]+)(-?\d+)$/);
+		const table = roleMatch && ROLE_TABLE_MAP[roleMatch[1].toLowerCase()];
+		if (roleMatch && table) {
+			args.table = table;
+			args.id = roleMatch[2];
+		}
+
+		return this.ascCall(credentials, "/timetable/server/currenttt.js", "curentttGetData", [args]);
 	}
 
 	/** Escape-Hatch für Edupage-Endpunkte außerhalb des __func/__args-Musters. */
