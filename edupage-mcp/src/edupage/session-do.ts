@@ -89,31 +89,23 @@ export class EdupageSessionDO extends DurableObject<Env> {
 		});
 		const html = await dashboardResponse.text();
 
-		const match = html.match(/\.userhome\((\{[\s\S]*?\})\);/);
-		if (!match) {
-			// TEMPORÄR: Diagnose-Ausgabe zum Herausfinden des tatsächlichen
-			// Edupage-Seitenformats. Wird entfernt, sobald das Pattern feststeht.
-			const idx = html.indexOf("gsechash");
-			const around = idx >= 0 ? html.slice(Math.max(0, idx - 300), idx + 300).replace(/\s+/g, " ") : "n/a";
-			throw new Error("DEBUG gsechashAt=" + idx + " around=" + around);
+		// Das Dashboard bettet seinen Zustand nicht als JSON ein, sondern als
+		// eine Reihe von `ASC.<feld> = <wert>;`-Zuweisungen in einem
+		// <script>-Tag (z. B. `ASC.gsechash="6e94790d";`, `ASC.edupage="bktm";`).
+		const gsechashMatch = html.match(/ASC\.gsechash\s*=\s*"([^"]*)"/);
+		if (!gsechashMatch || !gsechashMatch[1]) {
+			throw new Error(
+				"Login schien zu funktionieren, aber `ASC.gsechash` (CSRF-Token) wurde nicht in der " +
+					"Dashboard-Seite gefunden. Entweder hat Edupage sein Seitenlayout geändert, oder " +
+					"domain/username/password sind falsch.",
+			);
 		}
-
-		let data: Record<string, unknown>;
-		try {
-			data = JSON.parse(match[1]);
-		} catch {
-			throw new Error("Eingebettete Edupage-Dashboard-Daten konnten nicht als JSON geparst werden.");
-		}
-
-		const gsechash = data.gsechash as string | undefined;
-		if (!gsechash) {
-			throw new Error("Eingeloggt, aber kein `gsechash` (CSRF-Token) in den Dashboard-Daten gefunden.");
-		}
+		const userIdMatch = html.match(/ASC\.userid\s*=\s*"([^"]*)"/);
 
 		const session: EdupageSession = {
 			cookie,
-			gsechash,
-			userId: data.userid as string | undefined,
+			gsechash: gsechashMatch[1],
+			userId: userIdMatch?.[1],
 			loggedInAt: Date.now(),
 		};
 		this.session = session;
