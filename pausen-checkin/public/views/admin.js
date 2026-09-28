@@ -917,46 +917,58 @@ async function renderCourseReportTab(container, token, course, { handleAuthError
 	}
 }
 
+function worklogGroupKey(groupId) {
+	return groupId === null ? "none" : String(groupId);
+}
+
 async function renderWorklogReport(container, token, course, { handleAuthError }) {
 	try {
 		const report = await api.getWorklogReport(token, course.id);
 		const { summary, groups, participants } = report;
 
-		const groupRows = groups
-			.map(
-				(group) => `
-					<tr>
-						<td>${group.groupName}</td>
-						<td>${group.memberCount}</td>
+		const participantsByGroup = new Map();
+		for (const participant of participants) {
+			const key = worklogGroupKey(participant.groupId);
+			if (!participantsByGroup.has(key)) participantsByGroup.set(key, []);
+			participantsByGroup.get(key).push(participant);
+		}
+
+		const treeRows = groups
+			.map((group) => {
+				const members = participantsByGroup.get(worklogGroupKey(group.groupId)) ?? [];
+				const memberRows = members
+					.map(
+						(participant) => `
+							<tr class="worklog-participant-row">
+								<td class="tree-child">${participant.name}</td>
+								<td>${formatDurationLabel(participant.totalMinutes)}</td>
+								<td>
+									${participant.totalDays > 0 ? Math.round((participant.completeDays / participant.totalDays) * 100) : 0}%
+									(${participant.completeDays}/${participant.totalDays} Tage)
+								</td>
+								<td>
+									${participant.days
+										.map(
+											(day) =>
+												`<span class="day-chip${day.isComplete ? " is-complete" : " is-incomplete"}" title="${day.date}: ${formatMinutes(day.minutes)}"></span>`,
+										)
+										.join("")}
+								</td>
+							</tr>
+						`,
+					)
+					.join("");
+
+				return `
+					<tr class="worklog-group-row">
+						<td>${group.groupName} <span class="muted">(${group.memberCount})</span></td>
 						<td>${formatDurationLabel(group.totalMinutes)}</td>
 						<td>${group.totalDays > 0 ? Math.round((group.completeDays / group.totalDays) * 100) : 0}% (${group.completeDays}/${group.totalDays} Tage)</td>
+						<td></td>
 					</tr>
-				`,
-			)
-			.join("");
-
-		const participantRows = participants
-			.map(
-				(participant) => `
-					<tr>
-						<td>${participant.name}</td>
-						<td>${participant.groupName ?? "Ohne Gruppe"}</td>
-						<td>${formatDurationLabel(participant.totalMinutes)}</td>
-						<td>
-							${participant.totalDays > 0 ? Math.round((participant.completeDays / participant.totalDays) * 100) : 0}%
-							(${participant.completeDays}/${participant.totalDays} Tage)
-						</td>
-						<td>
-							${participant.days
-								.map(
-									(day) =>
-										`<span class="day-chip${day.isComplete ? " is-complete" : " is-incomplete"}" title="${day.date}: ${formatMinutes(day.minutes)}"></span>`,
-								)
-								.join("")}
-						</td>
-					</tr>
-				`,
-			)
+					${memberRows}
+				`;
+			})
 			.join("");
 
 		container.innerHTML = `
@@ -966,20 +978,11 @@ async function renderWorklogReport(container, token, course, { handleAuthError }
 				Vollständigkeit: ${summary.completenessPercent}% (${summary.totalCompleteDays}/${summary.totalPossibleDays} Personentage vollständig)
 			</p>
 
-			<h3>Nach Gruppe</h3>
 			<table class="data-table">
 				<thead>
-					<tr><th>Gruppe</th><th>Mitglieder</th><th>Summe</th><th>Vollständigkeit</th></tr>
+					<tr><th>Gruppe / Teilnehmer</th><th>Summe</th><th>Vollständigkeit</th><th>Tage</th></tr>
 				</thead>
-				<tbody>${groupRows || '<tr><td colspan="4" class="muted">Keine Gruppen</td></tr>'}</tbody>
-			</table>
-
-			<h3 style="margin-top: 20px;">Nach Teilnehmer</h3>
-			<table class="data-table">
-				<thead>
-					<tr><th>Name</th><th>Gruppe</th><th>Summe</th><th>Vollständigkeit</th><th>Tage</th></tr>
-				</thead>
-				<tbody>${participantRows || '<tr><td colspan="5" class="muted">Keine Teilnehmer</td></tr>'}</tbody>
+				<tbody>${treeRows || '<tr><td colspan="4" class="muted">Keine Gruppen</td></tr>'}</tbody>
 			</table>
 		`;
 	} catch (error) {

@@ -489,3 +489,18 @@ nav.top a {
 .worklog-total-badge.is-complete {
 	color: var(--color-present);
 }
+
+.worklog-group-row td {
+	font-weight: 600;
+	background: var(--color-bg);
+}
+
+.worklog-participant-row td.tree-child {
+	padding-left: 32px;
+	font-weight: 400;
+	color: var(--color-text);
+}
+
+.worklog-participant-row td {
+	font-weight: 400;
+}
