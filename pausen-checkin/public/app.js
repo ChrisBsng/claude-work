@@ -12,6 +12,7 @@ const dashboardMatch = path.match(/^\/d\/([^/]+)\/?$/);
 if (path === "/admin" || path === "/admin/") {
 	renderAdmin(root);
 } else if (checkinMatch) {
+	document.body.classList.add("force-light-theme");
 	renderCheckin(root, checkinMatch[1]);
 } else if (dashboardMatch) {
 	root.classList.add("dashboard-app");

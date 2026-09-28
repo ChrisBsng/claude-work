@@ -382,29 +382,24 @@ adminRouter.get("/courses/:id/export.xlsx", requireAdmin, async (request: IReque
 			p.name,
 			p.groupName ?? "Ohne Gruppe",
 			p.totalMinutes,
-			p.completeDays,
-			p.totalDays,
-			p.totalDays > 0 ? Math.round((p.completeDays / p.totalDays) * 1000) / 10 : 0,
+			p.expectedMinutes,
+			p.completenessPercent ?? 0,
 		]);
 		sheets.push({
 			name: "Worklog-Übersicht",
-			rows: [
-				["Name", "Gruppe", "Summe (Min)", "Vollständige Tage", "Projekttage (bisher)", "Vollständigkeit (%)"],
-				...worklogOverviewRows,
-			],
+			rows: [["Name", "Gruppe", "Erfasst (Min)", "Erwartet bisher (Min)", "Vollständigkeit (%)"], ...worklogOverviewRows],
 		});
 
 		const worklogGroupRows: XlsxCell[][] = report.groups.map((g) => [
 			g.groupName,
 			g.memberCount,
 			g.totalMinutes,
-			g.completeDays,
-			g.totalDays,
-			g.totalDays > 0 ? Math.round((g.completeDays / g.totalDays) * 1000) / 10 : 0,
+			g.expectedMinutes,
+			g.completenessPercent ?? 0,
 		]);
 		sheets.push({
 			name: "Worklog nach Gruppe",
-			rows: [["Gruppe", "Mitglieder", "Summe (Min)", "Vollständige Tage", "Personentage gesamt", "Vollständigkeit (%)"], ...worklogGroupRows],
+			rows: [["Gruppe", "Mitglieder", "Erfasst (Min)", "Erwartet bisher (Min)", "Vollständigkeit (%)"], ...worklogGroupRows],
 		});
 
 		const { results: worklogEntries } = await env.DB.prepare(
@@ -694,6 +689,8 @@ async function buildWorklogReport(db: D1Database, course: CourseRow) {
 		minutesByParticipantDate.set(key, (minutesByParticipantDate.get(key) ?? 0) + entry.minutes);
 	}
 
+	const percentOf = (logged: number, expected: number) => (expected > 0 ? Math.round((logged / expected) * 1000) / 10 : null);
+
 	const participantReports = participants.map((p) => {
 		const days = pastProjectDays.map((date) => {
 			const minutes = minutesByParticipantDate.get(`${p.id}|${date}`) ?? 0;
@@ -701,12 +698,15 @@ async function buildWorklogReport(db: D1Database, course: CourseRow) {
 		});
 		const totalMinutes = days.reduce((sum, d) => sum + d.minutes, 0);
 		const completeDays = days.filter((d) => d.isComplete).length;
+		const expectedMinutes = days.length * target;
 		return {
 			id: p.id,
 			name: p.name,
 			groupId: p.group_id,
 			groupName: p.group_name,
 			totalMinutes,
+			expectedMinutes,
+			completenessPercent: percentOf(totalMinutes, expectedMinutes),
 			completeDays,
 			totalDays: days.length,
 			days,
@@ -715,7 +715,15 @@ async function buildWorklogReport(db: D1Database, course: CourseRow) {
 
 	const groupMap = new Map<
 		string,
-		{ groupId: number | null; groupName: string; totalMinutes: number; memberCount: number; completeDays: number; totalDays: number }
+		{
+			groupId: number | null;
+			groupName: string;
+			totalMinutes: number;
+			expectedMinutes: number;
+			memberCount: number;
+			completeDays: number;
+			totalDays: number;
+		}
 	>();
 	for (const p of participantReports) {
 		const key = p.groupId === null ? "none" : String(p.groupId);
@@ -723,11 +731,13 @@ async function buildWorklogReport(db: D1Database, course: CourseRow) {
 			groupId: p.groupId,
 			groupName: p.groupName ?? "Ohne Gruppe",
 			totalMinutes: 0,
+			expectedMinutes: 0,
 			memberCount: 0,
 			completeDays: 0,
 			totalDays: 0,
 		};
 		existing.totalMinutes += p.totalMinutes;
+		existing.expectedMinutes += p.expectedMinutes;
 		existing.memberCount += 1;
 		existing.completeDays += p.completeDays;
 		existing.totalDays += p.totalDays;
@@ -736,6 +746,8 @@ async function buildWorklogReport(db: D1Database, course: CourseRow) {
 
 	const totalPossibleDays = participants.length * pastProjectDays.length;
 	const totalCompleteDays = participantReports.reduce((sum, p) => sum + p.completeDays, 0);
+	const totalExpectedMinutes = totalPossibleDays * target;
+	const totalLoggedMinutes = participantReports.reduce((sum, p) => sum + p.totalMinutes, 0);
 
 	return {
 		course: {
@@ -744,13 +756,15 @@ async function buildWorklogReport(db: D1Database, course: CourseRow) {
 			pastProjectDaysCount: pastProjectDays.length,
 		},
 		summary: {
-			totalExpectedMinutes: totalPossibleDays * target,
-			totalLoggedMinutes: participantReports.reduce((sum, p) => sum + p.totalMinutes, 0),
+			totalExpectedMinutes,
+			totalLoggedMinutes,
 			totalCompleteDays,
 			totalPossibleDays,
-			completenessPercent: totalPossibleDays > 0 ? Math.round((totalCompleteDays / totalPossibleDays) * 1000) / 10 : null,
+			completenessPercent: percentOf(totalLoggedMinutes, totalExpectedMinutes),
 		},
-		groups: [...groupMap.values()].sort((a, b) => a.groupName.localeCompare(b.groupName, "de")),
+		groups: [...groupMap.values()]
+			.map((g) => ({ ...g, completenessPercent: percentOf(g.totalMinutes, g.expectedMinutes) }))
+			.sort((a, b) => a.groupName.localeCompare(b.groupName, "de")),
 		participants: participantReports,
 	};
 }

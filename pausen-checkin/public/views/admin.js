@@ -942,10 +942,7 @@ async function renderWorklogReport(container, token, course, { handleAuthError }
 							<tr class="worklog-participant-row">
 								<td class="tree-child">${participant.name}</td>
 								<td>${formatDurationLabel(participant.totalMinutes)}</td>
-								<td>
-									${participant.totalDays > 0 ? Math.round((participant.completeDays / participant.totalDays) * 100) : 0}%
-									(${participant.completeDays}/${participant.totalDays} Tage)
-								</td>
+								<td>${participant.completenessPercent ?? 0}% (${formatDurationLabel(participant.expectedMinutes)} erwartet)</td>
 								<td>
 									${participant.days
 										.map(
@@ -963,7 +960,7 @@ async function renderWorklogReport(container, token, course, { handleAuthError }
 					<tr class="worklog-group-row">
 						<td>${group.groupName} <span class="muted">(${group.memberCount})</span></td>
 						<td>${formatDurationLabel(group.totalMinutes)}</td>
-						<td>${group.totalDays > 0 ? Math.round((group.completeDays / group.totalDays) * 100) : 0}% (${group.completeDays}/${group.totalDays} Tage)</td>
+						<td>${group.completenessPercent ?? 0}% (${formatDurationLabel(group.expectedMinutes)} erwartet)</td>
 						<td></td>
 					</tr>
 					${memberRows}
@@ -975,7 +972,7 @@ async function renderWorklogReport(container, token, course, { handleAuthError }
 			<p class="muted">
 				${report.course.pastProjectDaysCount} von ${report.course.projectDaysCount} Projekttagen bereits vergangen ·
 				Gesamt erfasst: ${formatDurationLabel(summary.totalLoggedMinutes)} von ${formatDurationLabel(summary.totalExpectedMinutes)} erwartet ·
-				Vollständigkeit: ${summary.completenessPercent}% (${summary.totalCompleteDays}/${summary.totalPossibleDays} Personentage vollständig)
+				Vollständigkeit: ${summary.completenessPercent ?? 0}%
 			</p>
 
 			<table class="data-table">

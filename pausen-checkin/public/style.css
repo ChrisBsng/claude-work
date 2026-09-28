@@ -22,6 +22,15 @@
 	}
 }
 
+/* Schüleransicht (Check-in) bleibt unabhängig vom OS-Farbschema immer hell. */
+body.force-light-theme {
+	--color-bg: #f5f6f8;
+	--color-surface: #ffffff;
+	--color-border: #dfe3e8;
+	--color-text: #1a1d21;
+	--color-muted: #6b7280;
+}
+
 * {
 	box-sizing: border-box;
 }
@@ -286,6 +295,7 @@ button:disabled {
 	max-height: 56px;
 	max-width: 220px;
 	object-fit: contain;
+	border-radius: 6px;
 }
 
 .image-grid {
