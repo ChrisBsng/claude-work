@@ -1,0 +1,21 @@
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "edupage-mcp",
+	"main": "src/index.ts",
+	"compatibility_date": "2026-09-28",
+	"observability": {
+		"enabled": true
+	},
+	"durable_objects": {
+		"bindings": [
+			{ "name": "MCP_AGENT", "class_name": "EdupageMcpAgent" },
+			{ "name": "EDUPAGE_SESSION", "class_name": "EdupageSessionDO" }
+		]
+	},
+	"migrations": [
+		{
+			"tag": "v1",
+			"new_sqlite_classes": ["EdupageMcpAgent", "EdupageSessionDO"]
+		}
+	]
+}

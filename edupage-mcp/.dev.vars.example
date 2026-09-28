@@ -1,0 +1,7 @@
+EDUPAGE_SUBDOMAIN=musterschule
+EDUPAGE_USERNAME=vorname.nachname
+EDUPAGE_PASSWORD=change-me
+# Optional. Schützt den MCP-Endpunkt mit einem Bearer-Token
+# (Header "Authorization: Bearer <token>"). Ohne gesetztes Secret ist
+# der Worker offen erreichbar - nur für lokale Entwicklung sinnvoll.
+MCP_AUTH_TOKEN=
