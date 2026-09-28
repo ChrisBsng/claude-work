@@ -1,5 +1,6 @@
 import { api } from "/api.js";
 import { renderBrandHeader } from "/brandHeader.js";
+import { MAX_TEXT_INPUT_LENGTH, truncateLabel } from "/textUtils.js";
 
 const POLL_INTERVAL_MS = 5000;
 
@@ -77,15 +78,15 @@ async function renderLogin(root, checkinCode, course) {
 						? `<label for="name-select">Dein Name</label>
 						<select id="name-select">
 							<option value="">-- Auswählen --</option>
-							${names.map((n) => `<option value="${n}">${n}</option>`).join("")}
+							${names.map((n) => `<option value="${n}" title="${n}">${truncateLabel(n)}</option>`).join("")}
 							<option value="__new__">Ich bin neu / nicht in der Liste</option>
 						</select>
 						<div id="new-name-wrapper" hidden>
 							<label for="new-name">Dein Name (Vorname Nachname)</label>
-							<input type="text" id="new-name" placeholder="Vorname Nachname" />
+							<input type="text" id="new-name" placeholder="Vorname Nachname" maxlength="${MAX_TEXT_INPUT_LENGTH}" />
 						</div>`
 						: `<label for="new-name">Dein Name (Vorname Nachname)</label>
-						<input type="text" id="new-name" placeholder="Vorname Nachname" autofocus required />`
+						<input type="text" id="new-name" placeholder="Vorname Nachname" maxlength="${MAX_TEXT_INPUT_LENGTH}" autofocus required />`
 				}
 
 				<div id="group-field-wrapper" ${hasNames ? "hidden" : ""}>
@@ -94,15 +95,15 @@ async function renderLogin(root, checkinCode, course) {
 							? `<label for="group-select">Deine Gruppe</label>
 							<select id="group-select">
 								<option value="">-- Auswählen --</option>
-								${groups.map((g) => `<option value="${g}">${g}</option>`).join("")}
+								${groups.map((g) => `<option value="${g}" title="${g}">${truncateLabel(g)}</option>`).join("")}
 								<option value="__new__">Neue Gruppe / nicht in der Liste</option>
 							</select>
 							<div id="new-group-wrapper" hidden>
 								<label for="new-group">Neue Gruppe</label>
-								<input type="text" id="new-group" />
+								<input type="text" id="new-group" maxlength="${MAX_TEXT_INPUT_LENGTH}" />
 							</div>`
 							: `<label for="new-group">Deine Gruppe</label>
-							<input type="text" id="new-group" />`
+							<input type="text" id="new-group" maxlength="${MAX_TEXT_INPUT_LENGTH}" />`
 					}
 				</div>
 
@@ -325,7 +326,12 @@ async function renderWorklogPanel(root, checkinCode, course, accessToken, onBack
 	body.innerHTML = `
 		<label for="worklog-day-select">Vergangene Projekttage</label>
 		<select id="worklog-day-select">
-			${sortedDays.map((day) => `<option value="${day.date}" ${day.date === initialDate ? "selected" : ""}>${dayOptionLabel(day)}</option>`).join("")}
+			${sortedDays
+				.map((day) => {
+					const label = dayOptionLabel(day);
+					return `<option value="${day.date}" title="${label}" ${day.date === initialDate ? "selected" : ""}>${truncateLabel(label, 60)}</option>`;
+				})
+				.join("")}
 		</select>
 
 		<div id="worklog-day-detail" style="margin-top: 16px;"><p class="muted">Lädt…</p></div>
@@ -367,12 +373,12 @@ async function renderWorklogPanel(root, checkinCode, course, accessToken, onBack
 		const taskOptions = tasks.length
 			? `<select id="worklog-task-select">
 					<option value="__new__">-- Neuer Task --</option>
-					${tasks.map((t) => `<option value="${t}">${t}</option>`).join("")}
+					${tasks.map((t) => `<option value="${t}" title="${t}">${truncateLabel(t)}</option>`).join("")}
 				</select>
 				<div id="worklog-new-task-wrapper">
-					<input type="text" id="worklog-new-task" placeholder="Task beschreiben" />
+					<input type="text" id="worklog-new-task" placeholder="Task beschreiben" maxlength="${MAX_TEXT_INPUT_LENGTH}" />
 				</div>`
-			: `<input type="text" id="worklog-new-task" placeholder="Task beschreiben" />`;
+			: `<input type="text" id="worklog-new-task" placeholder="Task beschreiben" maxlength="${MAX_TEXT_INPUT_LENGTH}" />`;
 
 		detail.innerHTML = `
 			<p class="worklog-total-badge ${isComplete ? "is-complete" : "is-incomplete"}">

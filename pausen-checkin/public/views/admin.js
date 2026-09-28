@@ -1,5 +1,6 @@
 import { api } from "/api.js";
 import { getBaseUrl } from "/baseUrl.js";
+import { MAX_TEXT_INPUT_LENGTH, truncateLabel } from "/textUtils.js";
 
 const TOKEN_KEY = "pausenCheckin.adminToken";
 const ROLE_KEY = "pausenCheckin.adminRole";
@@ -246,7 +247,7 @@ async function renderCoursesOverview(container, token, { refreshCourses, handleA
 			<h2>Neuen Kurs anlegen</h2>
 			<form id="course-form">
 				<label for="name">Name</label>
-				<input type="text" id="name" required />
+				<input type="text" id="name" maxlength="${MAX_TEXT_INPUT_LENGTH}" required />
 
 				<label for="durationDays">Laufzeit (Tage)</label>
 				<input type="number" id="durationDays" min="1" step="1" required />
@@ -442,7 +443,7 @@ async function renderCourseOverviewTab(container, token, course, { handleAuthErr
 			<h2>Einstellungen</h2>
 			<form id="settings-form">
 				<label for="name">Name</label>
-				<input type="text" id="name" value="${course.name}" required />
+				<input type="text" id="name" value="${course.name}" maxlength="${MAX_TEXT_INPUT_LENGTH}" required />
 
 				<label for="durationDays">Laufzeit (Tage)</label>
 				<input type="number" id="durationDays" min="1" step="1" value="${course.durationDays}" required />
@@ -658,15 +659,17 @@ async function renderHeaderPanel(container, token, course, onSaved) {
 
 	const leftOptions = [
 		`<option value="">Standard verwenden</option>`,
-		...images.map(
-			(img) => `<option value="${img.id}" ${course.headerLeftImageOverrideId === img.id ? "selected" : ""}>${imageOptionLabel(img)}</option>`,
-		),
+		...images.map((img) => {
+			const label = imageOptionLabel(img);
+			return `<option value="${img.id}" title="${label}" ${course.headerLeftImageOverrideId === img.id ? "selected" : ""}>${truncateLabel(label)}</option>`;
+		}),
 	].join("");
 	const rightOptions = [
 		`<option value="">Kein Bild</option>`,
-		...images.map(
-			(img) => `<option value="${img.id}" ${course.headerRightImageId === img.id ? "selected" : ""}>${imageOptionLabel(img)}</option>`,
-		),
+		...images.map((img) => {
+			const label = imageOptionLabel(img);
+			return `<option value="${img.id}" title="${label}" ${course.headerRightImageId === img.id ? "selected" : ""}>${truncateLabel(label)}</option>`;
+		}),
 	].join("");
 
 	container.innerHTML = `
@@ -723,7 +726,10 @@ async function renderCourseParticipantsTab(container, token, course, { handleAut
 	function groupOptions(selectedId) {
 		return [
 			`<option value="">Keine Gruppe</option>`,
-			...groups.map((g) => `<option value="${g.id}" ${g.id === selectedId ? "selected" : ""}>${g.name}</option>`),
+			...groups.map(
+				(g) =>
+					`<option value="${g.id}" title="${g.name}" ${g.id === selectedId ? "selected" : ""}>${truncateLabel(g.name)}</option>`,
+			),
 		].join("");
 	}
 
@@ -755,7 +761,7 @@ async function renderCourseParticipantsTab(container, token, course, { handleAut
 			tr.innerHTML = `
 				<td colspan="4">
 					<label>Name</label>
-					<input type="text" id="edit-name-${participant.id}" value="${participant.name}" />
+					<input type="text" id="edit-name-${participant.id}" value="${participant.name}" maxlength="${MAX_TEXT_INPUT_LENGTH}" />
 					<label>Gruppe</label>
 					<select id="edit-group-${participant.id}">${groupOptions(participant.groupId)}</select>
 					<div id="edit-error-${participant.id}"></div>
@@ -822,7 +828,7 @@ async function renderCourseGroupsTab(container, token, course, { handleAuthError
 			<h2>Neue Gruppe anlegen</h2>
 			<form id="group-form">
 				<label for="group-name">Name</label>
-				<input type="text" id="group-name" required />
+				<input type="text" id="group-name" maxlength="${MAX_TEXT_INPUT_LENGTH}" required />
 				<div id="group-form-error"></div>
 				<button type="submit">Anlegen</button>
 			</form>
@@ -869,7 +875,7 @@ async function renderCourseGroupsTab(container, token, course, { handleAuthError
 		groups.forEach((group) => {
 			const tr = document.createElement("tr");
 			tr.innerHTML = `
-				<td><input type="text" value="${group.name}" data-name-input data-write-action /></td>
+				<td><input type="text" value="${group.name}" maxlength="${MAX_TEXT_INPUT_LENGTH}" data-name-input data-write-action /></td>
 				<td>${group.memberCount}</td>
 				<td>
 					<button type="button" class="secondary" data-rename data-write-action>Umbenennen</button>
