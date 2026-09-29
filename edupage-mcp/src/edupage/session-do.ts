@@ -75,6 +75,8 @@ export interface TimetableItem {
 	period?: string;
 	subject?: string;
 	classes?: string[];
+	/** Interne Edupage-Klassen-IDs zu `classes` (gleiche Reihenfolge) - z. B. für edupage_get_attendance's classId. */
+	classIds?: string[];
 	teachers?: string[];
 	rooms?: string[];
 	allDay?: boolean;
@@ -297,6 +299,7 @@ function simplifyTimetableItem(raw: RawTimetableItem, lookup: NameLookup): Timet
 		period: flags?.period || raw.uniperiod || undefined,
 		subject: subjectId ? (lookup.subjects[subjectId] ?? subjectId) : undefined,
 		classes: resolveNames(raw.classids, lookup.classes),
+		classIds: raw.classids && raw.classids.length > 0 ? raw.classids : undefined,
 		teachers: resolveNames(raw.teacherids, lookup.teachers),
 		rooms: resolveNames(raw.classroomids, lookup.classrooms),
 		allDay: flags?.allday,

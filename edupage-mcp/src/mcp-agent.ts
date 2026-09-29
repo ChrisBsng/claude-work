@@ -30,7 +30,10 @@ export class EdupageMcpAgent extends McpAgent<Env, unknown, EdupageCredentials> 
 	async init() {
 		this.server.tool(
 			"edupage_get_timetable",
-			"Liefert den Stundenplan für einen Datumsbereich (YYYY-MM-DD). Ohne Angabe wird heute verwendet.",
+			"Liefert den Stundenplan für einen Datumsbereich (YYYY-MM-DD). Ohne Angabe wird heute verwendet. Jeder " +
+				"Eintrag enthält neben den Klarnamen (classes) auch die internen Klassen-IDs (classIds, gleiche " +
+				"Reihenfolge) - damit lassen sich z. B. alle in einer Woche unterrichteten Klassen ermitteln, um sie " +
+				"einzeln mit edupage_get_attendance abzufragen.",
 			{
 				dateFrom: z.string().optional().describe("Startdatum YYYY-MM-DD, Standard: heute"),
 				dateTo: z.string().optional().describe("Enddatum YYYY-MM-DD, Standard: dateFrom"),
@@ -48,16 +51,19 @@ export class EdupageMcpAgent extends McpAgent<Env, unknown, EdupageCredentials> 
 		this.server.tool(
 			"edupage_get_attendance",
 			"Liefert die Schüler-Anwesenheit (anwesend/abwesend/verspätet/entschuldigt je Schüler, Datum und " +
-				"Stunde) für eine Woche - der Bereich 'Unterricht -> Schüler-Abwesenheit'. Ohne classId bleibt die " +
-				"zuletzt/serverseitig vorausgewählte Klasse aktiv (meist die eigene Klasse).",
+				"Stunde) für eine Woche - der Bereich 'Unterricht -> Schüler-Abwesenheit'. Liefert immer nur EINE " +
+				"Klasse pro Aufruf: mit classId die angegebene, ohne classId die zuletzt/serverseitig " +
+				"vorausgewählte Klasse (meist die eigene). Um alle Klassen einer Woche abzudecken, zuerst " +
+				"edupage_get_timetable für den Zeitraum aufrufen, die eindeutigen classIds daraus sammeln und " +
+				"edupage_get_attendance einmal je classId aufrufen.",
 			{
 				date: z.string().describe("Ein beliebiges Datum (YYYY-MM-DD) innerhalb der gewünschten Woche"),
 				classId: z
 					.string()
 					.optional()
 					.describe(
-						"Interne Edupage-Klassen-ID (z. B. \"-461\"), zu finden über edupage_get_timetable's classes-Feld " +
-							"oder edupage_raw_call auf mainDBIAccessor. Ohne Angabe: zuletzt gewählte/eigene Klasse.",
+						"Interne Edupage-Klassen-ID (z. B. \"-461\"), aus edupage_get_timetable's classIds-Feld. Ohne " +
+							"Angabe: zuletzt gewählte/eigene Klasse.",
 					),
 			},
 			async ({ date, classId }: { date: string; classId?: string }) => {
