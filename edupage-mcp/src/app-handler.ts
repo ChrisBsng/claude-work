@@ -104,7 +104,10 @@ async function handleAuthorizePost(request: Request, env: AppEnv): Promise<Respo
 		const approved = await env.OAUTH_PROVIDER.approveConsent(request, handle, { scope: ["edupage"] });
 		const { redirectTo } = await env.OAUTH_PROVIDER.completeAuthorization({
 			request: approved.request,
-			userId: `${domain}:${username}`,
+			// userId darf laut Bibliothek keinen ":" enthalten (trennt intern
+			// Token-/Storage-Key-Teile) - domain+username daher encoden statt
+			// mit ":" zu verbinden.
+			userId: encodeURIComponent(`${domain}:${username}`),
 			metadata: { domain, username },
 			scope: ["edupage"],
 			props: credentials,
