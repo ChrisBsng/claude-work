@@ -4,4 +4,5 @@ import type { EdupageSessionDO } from "./edupage/session-do";
 export interface Env {
 	MCP_AGENT: DurableObjectNamespace<EdupageMcpAgent>;
 	EDUPAGE_SESSION: DurableObjectNamespace<EdupageSessionDO>;
+	OAUTH_KV: KVNamespace;
 }

@@ -12,6 +12,9 @@
 			{ "name": "EDUPAGE_SESSION", "class_name": "EdupageSessionDO" }
 		]
 	},
+	"kv_namespaces": [
+		{ "binding": "OAUTH_KV", "id": "43ebc76947254209a3b044579e40187a" }
+	],
 	"migrations": [
 		{
 			"tag": "v1",

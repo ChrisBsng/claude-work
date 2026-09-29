@@ -2,83 +2,45 @@ import { McpAgent } from "agents/mcp";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { Env } from "./env";
-import type { EdupageCredentials } from "./edupage/session-do";
+import type { EdupageCredentials, EdupageSessionDO } from "./edupage/session-do";
+import { sessionKeyFor } from "./edupage/session-key";
 
-const domainField = z
-	.string()
-	.regex(/^[a-z0-9-]{1,63}$/i, "Nur die Subdomain, z. B. \"musterschule\" bei musterschule.edupage.org")
-	.describe('Edupage-Subdomain, z. B. "musterschule" bei musterschule.edupage.org (ohne ".edupage.org")');
-const usernameField = z.string().min(1).describe("Edupage-Benutzername/Login");
-const passwordField = z.string().min(1).describe("Edupage-Passwort. Wird nur für den Login verwendet, nicht gespeichert.");
-
-const credentialsShape = {
-	domain: domainField,
-	username: usernameField,
-	password: passwordField,
-};
-
-const identityShape = {
-	domain: domainField,
-	username: usernameField,
-};
-
-export class EdupageMcpAgent extends McpAgent<Env> {
-	server = new McpServer({ name: "edupage-mcp", version: "0.2.0" });
+export class EdupageMcpAgent extends McpAgent<Env, unknown, EdupageCredentials> {
+	server = new McpServer({ name: "edupage-mcp", version: "0.3.0" });
 
 	/**
-	 * Adressiert das Session-Durable-Object für ein Domain+Benutzername-Paar
-	 * über einen SHA-256-Hash, statt Rohdaten in den DO-Namen zu schreiben.
-	 * So landen dieselben Zugangsdaten immer auf derselben (gecachten)
-	 * Session, ohne dass Cloudflare-Logs/Analytics Klartext-Benutzernamen
-	 * als DO-Namen sehen.
+	 * Die Edupage-Zugangsdaten kommen nicht mehr pro Tool-Aufruf, sondern aus
+	 * this.props - gesetzt einmalig beim OAuth-Authorize-Flow (siehe
+	 * app-handler.ts) und für die Dauer der MCP-Verbindung von der Agents-SDK
+	 * persistiert. Das zugehörige Session-DO wird über denselben Hash wie
+	 * beim Login adressiert, damit dieselbe (gecachte) Edupage-Session
+	 * wiederverwendet wird.
 	 */
-	private async sessionFor(domain: string, username: string) {
-		const key = `${domain.toLowerCase()}\u0000${username.toLowerCase()}`;
-		const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(key));
-		const hash = Array.from(new Uint8Array(digest))
-			.map((b) => b.toString(16).padStart(2, "0"))
-			.join("");
-		return this.env.EDUPAGE_SESSION.getByName(hash);
+	private async session(): Promise<{ stub: DurableObjectStub<EdupageSessionDO>; credentials: EdupageCredentials }> {
+		const credentials = this.props;
+		if (!credentials) {
+			throw new Error(
+				"Keine Edupage-Zugangsdaten hinterlegt. Bitte den Connector über /authorize (neu) verbinden.",
+			);
+		}
+		const key = await sessionKeyFor(credentials.domain, credentials.username);
+		return { stub: this.env.EDUPAGE_SESSION.getByName(key), credentials };
 	}
 
 	async init() {
 		this.server.tool(
-			"edupage_login",
-			"Loggt sich mit den übergebenen Zugangsdaten bei Edupage ein bzw. erneuert die Session. Optional - " +
-				"die anderen Tools loggen sich bei Bedarf automatisch ein.",
-			credentialsShape,
-			async (credentials: EdupageCredentials) => {
-				const session = await this.sessionFor(credentials.domain, credentials.username);
-				const result = await session.login(credentials);
-				return { content: [{ type: "text" as const, text: JSON.stringify(result) }] };
-			},
-		);
-
-		this.server.tool(
-			"edupage_logout",
-			"Löscht die für domain+username gespeicherte Edupage-Session, sodass sich der nächste Aufruf neu einloggt.",
-			identityShape,
-			async ({ domain, username }) => {
-				const session = await this.sessionFor(domain, username);
-				await session.logout();
-				return { content: [{ type: "text" as const, text: "Ausgeloggt." }] };
-			},
-		);
-
-		this.server.tool(
 			"edupage_get_timetable",
 			"Liefert den Stundenplan für einen Datumsbereich (YYYY-MM-DD). Ohne Angabe wird heute verwendet.",
 			{
-				...credentialsShape,
 				dateFrom: z.string().optional().describe("Startdatum YYYY-MM-DD, Standard: heute"),
 				dateTo: z.string().optional().describe("Enddatum YYYY-MM-DD, Standard: dateFrom"),
 			},
-			async ({ dateFrom, dateTo, ...credentials }: EdupageCredentials & { dateFrom?: string; dateTo?: string }) => {
+			async ({ dateFrom, dateTo }: { dateFrom?: string; dateTo?: string }) => {
 				const today = new Date().toISOString().slice(0, 10);
 				const from = dateFrom ?? today;
 				const to = dateTo ?? from;
-				const session = await this.sessionFor(credentials.domain, credentials.username);
-				const data = await session.getTimetable(credentials, from, to);
+				const { stub, credentials } = await this.session();
+				const data = await stub.getTimetable(credentials, from, to);
 				return { content: [{ type: "text" as const, text: JSON.stringify(data) }] };
 			},
 		);
@@ -89,7 +51,6 @@ export class EdupageMcpAgent extends McpAgent<Env> {
 				"Stunde) für eine Woche - der Bereich 'Unterricht -> Schüler-Abwesenheit'. Ohne classId bleibt die " +
 				"zuletzt/serverseitig vorausgewählte Klasse aktiv (meist die eigene Klasse).",
 			{
-				...credentialsShape,
 				date: z.string().describe("Ein beliebiges Datum (YYYY-MM-DD) innerhalb der gewünschten Woche"),
 				classId: z
 					.string()
@@ -99,10 +60,22 @@ export class EdupageMcpAgent extends McpAgent<Env> {
 							"oder edupage_raw_call auf mainDBIAccessor. Ohne Angabe: zuletzt gewählte/eigene Klasse.",
 					),
 			},
-			async ({ date, classId, ...credentials }: EdupageCredentials & { date: string; classId?: string }) => {
-				const session = await this.sessionFor(credentials.domain, credentials.username);
-				const data = await session.getAttendance(credentials, date, classId);
+			async ({ date, classId }: { date: string; classId?: string }) => {
+				const { stub, credentials } = await this.session();
+				const data = await stub.getAttendance(credentials, date, classId);
 				return { content: [{ type: "text" as const, text: JSON.stringify(data) }] };
+			},
+		);
+
+		this.server.tool(
+			"edupage_logout",
+			"Löscht die für die aktuell verbundenen Edupage-Zugangsdaten gespeicherte Session, sodass sich der " +
+				"nächste Aufruf neu einloggt.",
+			{},
+			async () => {
+				const { stub } = await this.session();
+				await stub.logout();
+				return { content: [{ type: "text" as const, text: "Ausgeloggt." }] };
 			},
 		);
 
@@ -113,19 +86,13 @@ export class EdupageMcpAgent extends McpAgent<Env> {
 				"zu deployen. path/func/args findet man im Browser über die Entwicklertools -> Netzwerk -> XHR-" +
 				"Requests, die __func/__args im JSON-Body tragen.",
 			{
-				...credentialsShape,
 				path: z.string().describe("Pfad auf dem Edupage-Host, z. B. /timetable/server/currenttt.js"),
 				func: z.string().describe("Der __func-Wert, z. B. curentttGetData"),
 				args: z.array(z.unknown()).optional().describe("Zusätzliche Argumente nach dem führenden null in __args"),
 			},
-			async ({
-				path,
-				func,
-				args,
-				...credentials
-			}: EdupageCredentials & { path: string; func: string; args?: unknown[] }) => {
-				const session = await this.sessionFor(credentials.domain, credentials.username);
-				const data = await session.ascCall(credentials, path, func, args ?? []);
+			async ({ path, func, args }: { path: string; func: string; args?: unknown[] }) => {
+				const { stub, credentials } = await this.session();
+				const data = await stub.ascCall(credentials, path, func, args ?? []);
 				return { content: [{ type: "text" as const, text: JSON.stringify(data) }] };
 			},
 		);
@@ -135,19 +102,13 @@ export class EdupageMcpAgent extends McpAgent<Env> {
 			"Escape-Hatch: führt einen beliebigen authentifizierten HTTP-Request gegen den Edupage-Host aus (mit " +
 				"der gespeicherten Session-Cookie). Für Endpunkte außerhalb des __func/__args-Musters.",
 			{
-				...credentialsShape,
 				path: z.string().describe("Pfad auf dem Edupage-Host, z. B. /dashboard/eb.php"),
 				method: z.enum(["GET", "POST"]).default("GET"),
 				body: z.string().optional().describe("Roher Request-Body für POST-Requests"),
 			},
-			async ({
-				path,
-				method,
-				body,
-				...credentials
-			}: EdupageCredentials & { path: string; method: "GET" | "POST"; body?: string }) => {
-				const session = await this.sessionFor(credentials.domain, credentials.username);
-				const result = await session.rawFetch(credentials, path, { method, body });
+			async ({ path, method, body }: { path: string; method: "GET" | "POST"; body?: string }) => {
+				const { stub, credentials } = await this.session();
+				const result = await stub.rawFetch(credentials, path, { method, body });
 				return {
 					content: [{ type: "text" as const, text: `HTTP ${result.status}\n\n${result.body.slice(0, 20000)}` }],
 				};
@@ -161,13 +122,12 @@ export class EdupageMcpAgent extends McpAgent<Env> {
 				"zurück. Nützlich, um im HTML/Inline-JS einer Dashboard-Seite zu finden, mit welchen Parametern " +
 				"das echte Edupage-Frontend eine bestimmte RPC-Funktion aufruft.",
 			{
-				...credentialsShape,
 				path: z.string().describe("Pfad auf dem Edupage-Host, z. B. /dashboard/eb.php?mode=timetable"),
 				find: z.string().min(1).describe('Zu suchender Textausschnitt, z. B. "curentttGetData"'),
 			},
-			async ({ path, find, ...credentials }: EdupageCredentials & { path: string; find: string }) => {
-				const session = await this.sessionFor(credentials.domain, credentials.username);
-				const result = await session.findInPage(credentials, path, find);
+			async ({ path, find }: { path: string; find: string }) => {
+				const { stub, credentials } = await this.session();
+				const result = await stub.findInPage(credentials, path, find);
 				const text =
 					result.matches.length === 0
 						? `HTTP ${result.status} - kein Treffer für "${find}" gefunden.`

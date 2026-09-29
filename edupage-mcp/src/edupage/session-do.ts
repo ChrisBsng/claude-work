@@ -1,10 +1,13 @@
 import { DurableObject } from "cloudflare:workers";
 import type { Env } from "../env";
 
+// Index-Signatur nötig, damit der Typ als McpAgent-Props-Parameter
+// (Record<string, unknown>) durchgereicht werden kann (siehe mcp-agent.ts).
 export interface EdupageCredentials {
 	domain: string;
 	username: string;
 	password: string;
+	[key: string]: unknown;
 }
 
 interface EdupageSession {
