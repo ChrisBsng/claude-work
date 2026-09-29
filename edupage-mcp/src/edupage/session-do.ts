@@ -280,6 +280,90 @@ function extractJsonDcPayloads(js: string): Array<[unknown[], unknown[]]> {
 }
 
 /**
+ * Sucht den ersten `{...}`-Block ab `fromIndex`, klammertief- und string-
+ * bewusst (wie extractJsonDcPayloads), und liefert dessen Text inkl. der
+ * umschließenden Klammern zurück - oder undefined, falls kein `{` mehr
+ * folgt oder die Klammern nicht schließen.
+ */
+function extractBalancedObjectText(js: string, fromIndex: number): string | undefined {
+	const objStart = js.indexOf("{", fromIndex);
+	if (objStart === -1) return undefined;
+	let depth = 0;
+	let inString = false;
+	for (let i = objStart; i < js.length; i++) {
+		const ch = js[i];
+		if (inString) {
+			if (ch === "\\") {
+				i++;
+				continue;
+			}
+			if (ch === '"') inString = false;
+			continue;
+		}
+		if (ch === '"') {
+			inString = true;
+			continue;
+		}
+		if (ch === "{") depth++;
+		else if (ch === "}") {
+			depth--;
+			if (depth === 0) return js.slice(objStart, i + 1);
+		}
+	}
+	return undefined;
+}
+
+/**
+ * Zweites, komplett anderes Antwortformat derselben Anwesenheits-Ansicht:
+ * Ein Klassenwechsel (`gcall action=refresh, table=classes, id=<id>`)
+ * liefert die echten Zellendaten nicht als `ASC.json_dc(...)`, sondern als
+ * rohes (aber gültiges JSON-)Objektliteral, das direkt an das per
+ * `ASC.requireAsync(...).then(function(f){return f(...)})` nachgeladene
+ * Anzeige-Modul übergeben wird - z. B.
+ * `...then(function(f){return f(gi271491,gi236282,{"students":{...}},[...],false);});`.
+ * Diese Funktion holt das erste `{...}`-Objekt nach einem solchen
+ * `.then(function(f){return f(`-Aufruf heraus (die vorausgehenden Argumente
+ * sind schlichte Bezeichner ohne Klammern, daher reicht "erstes { danach").
+ */
+function extractInitModulePayload(js: string): unknown {
+	const marker = ".then(function(f){return f(";
+	const markerIdx = js.indexOf(marker);
+	if (markerIdx === -1) return undefined;
+	const objText = extractBalancedObjectText(js, markerIdx + marker.length);
+	if (!objText) return undefined;
+	try {
+		return JSON.parse(objText);
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * Drittes Fundstück im Klassenwechsel-Format: eine direkte
+ * `gi<N>.options={...};`-Zuweisung mit den echten Klartext-Definitionen der
+ * Abwesenheits-Codes (`ciselnik0`: id -> {short, name, color, ...}) - im
+ * Gegensatz zum json_dc-Format ist `studentabsent_types` hier nur eine
+ * flache ID-Liste ohne Klartexte, die Definitionen stecken in ciselnik0.
+ */
+function extractOptionsCiselnik0(js: string): Record<string, { short?: string; name?: string }> | undefined {
+	const marker = ".options={";
+	let searchFrom = 0;
+	while (true) {
+		const markerIdx = js.indexOf(marker, searchFrom);
+		if (markerIdx === -1) return undefined;
+		const objText = extractBalancedObjectText(js, markerIdx + marker.length - 1);
+		if (!objText) return undefined;
+		try {
+			const parsed = JSON.parse(objText) as { ciselnik0?: Record<string, { short?: string; name?: string }> };
+			if (parsed.ciselnik0) return parsed.ciselnik0;
+		} catch {
+			// Kein JSON (oder eine andere .options=-Zuweisung) - weitersuchen.
+		}
+		searchFrom = markerIdx + marker.length;
+	}
+}
+
+/**
  * Prüft strukturell, ob ein dekodiertes json_dc-Payload die Anwesenheits-
  * Zellen (students[id][datum][stunde] = {...}) trägt, statt z. B. der
  * (unter demselben "students"-Schlüssel liegenden!) flachen Schülerstamm-
@@ -301,6 +385,33 @@ function isAttendanceCellData(
 	// Leeres students-Objekt (z. B. echte Fehlanzeige für die Woche) - nichts
 	// dagegen einzuwenden, kann nicht als falsch erkannt werden.
 	return true;
+}
+
+/** Montag/Sonntag (YYYY-MM-DD, UTC) der Woche, die `dateStr` enthält. */
+function weekBounds(dateStr: string): { start: string; end: string } {
+	const d = new Date(`${dateStr}T00:00:00Z`);
+	const day = d.getUTCDay(); // 0 = Sonntag ... 6 = Samstag
+	const diffToMonday = day === 0 ? -6 : 1 - day;
+	const monday = new Date(d);
+	monday.setUTCDate(d.getUTCDate() + diffToMonday);
+	const sunday = new Date(monday);
+	sunday.setUTCDate(monday.getUTCDate() + 6);
+	const fmt = (x: Date) => x.toISOString().slice(0, 10);
+	return { start: fmt(monday), end: fmt(sunday) };
+}
+
+/** Ob mindestens ein Datumsschlüssel in cellData.students in [weekStart, weekEnd] fällt. */
+function attendanceCellDataMatchesWeek(
+	cellData: { students: Record<string, Record<string, unknown>> },
+	weekStart: string,
+	weekEnd: string,
+): boolean {
+	for (const byDate of Object.values(cellData.students)) {
+		for (const date of Object.keys(byDate)) {
+			if (date >= weekStart && date <= weekEnd) return true;
+		}
+	}
+	return false;
 }
 
 /**
@@ -615,54 +726,89 @@ export class EdupageSessionDO extends DurableObject<Env> {
 	): Promise<{ items: AttendanceItem[] }> {
 		const gpid = await this.getGpid(credentials, "/dashboard/eb.php?mode=attendance");
 
+		// Beide Antworten werden aufgehoben (nicht nur die letzte!): ein
+		// Klassenwechsel liefert die echten Zellendaten oft schon in SEINER
+		// EIGENEN Antwort mit (siehe extractInitModulePayload), nicht erst
+		// in der nachfolgenden Datums-Refresh-Antwort.
+		const responseTexts: string[] = [];
 		if (classId) {
-			await this.gcall(credentials, gpid, "refresh", { table: "classes", id: classId });
+			responseTexts.push(await this.gcall(credentials, gpid, "refresh", { table: "classes", id: classId }));
 		}
-		const responseText = await this.gcall(credentials, gpid, "refresh", { date: weekDate });
+		responseTexts.push(await this.gcall(credentials, gpid, "refresh", { date: weekDate }));
 
-		const payloads = extractJsonDcPayloads(responseText);
-		if (payloads.length === 0) {
+		// Edupage liefert die Zelldaten je nach Auslöser in einem von zwei
+		// grundverschiedenen Formaten: als ASC.json_dc(...) (z. B. bei reiner
+		// Datumsnavigation der zuvor schon aktiven Klasse) oder als rohes
+		// JS-Objektliteral, das an ein per requireAsync nachgeladenes
+		// Anzeigemodul übergeben wird (z. B. direkt nach einem
+		// Klassenwechsel). Daher werden ALLE Antworttexte nach BEIDEN
+		// Formaten durchsucht statt nur nach einem.
+		const decoded: unknown[] = [];
+		for (const text of responseTexts) {
+			for (const payload of extractJsonDcPayloads(text)) {
+				try {
+					decoded.push(decodeJsonDc(payload));
+				} catch {
+					// Kaputtes/unerwartetes Payload - überspringen.
+				}
+			}
+			const initModulePayload = extractInitModulePayload(text);
+			if (initModulePayload !== undefined) decoded.push(initModulePayload);
+		}
+		if (decoded.length === 0) {
 			throw new Error(
 				"Die Antwort der Anwesenheits-Ansicht enthielt keine erkennbaren Daten. Möglich: Edupage hat das " +
 					"Antwortformat geändert, oder für diese Woche/Klasse ist nichts hinterlegt.",
 			);
 		}
 
-		// Wie viele json_dc-Blöcke die Antwort enthält und in welcher
-		// Reihenfolge (Zelldaten vs. Referenz-/Stammdaten-Blöcke) variiert
-		// je nach Klasse - bei manchen Klassen kommt z. B. zusätzlich ein
-		// Schülerstammdaten-Block, der ebenfalls unter "students" liegt.
-		// Daher nicht mehr nach fester Position greifen, sondern jedes
-		// Payload dekodieren und strukturell erkennen, was es ist.
-		const decoded = payloads.map((p) => {
-			try {
-				return decodeJsonDc(p);
-			} catch {
-				return undefined;
-			}
-		});
-
-		const cellData = decoded.find(isAttendanceCellData);
+		// Unter mehreren strukturell passenden Kandidaten den bevorzugen,
+		// dessen Datumsschlüssel tatsächlich in die angefragte Woche fallen
+		// (ein Klassenwechsel kann z. B. noch Zelldaten der zuvor aktiven,
+		// ganz anderen Woche mitliefern - siehe getGpid/gcall-Kommentare).
+		// Ein leerer, aber sonst passender Kandidat gilt als echte
+		// Fehlanzeige für die Woche und wird akzeptiert; ein NICHT-leerer
+		// Kandidat für eine andere Woche wird verworfen, um keine falsch
+		// zugeordneten Daten zurückzugeben.
+		const { start: weekStart, end: weekEnd } = weekBounds(weekDate);
+		const cellCandidates = decoded.filter(isAttendanceCellData);
+		const cellData =
+			cellCandidates.find((c) => attendanceCellDataMatchesWeek(c, weekStart, weekEnd)) ??
+			cellCandidates.find((c) => Object.keys(c.students).length === 0);
 		if (!cellData) {
 			throw new Error(
-				"Die Antwort der Anwesenheits-Ansicht enthielt keine auswertbaren Stundeneinträge (nur " +
-					"Referenz-/Schülerstammdaten). Möglich: für diese Woche/Klasse liegt nichts vor, oder Edupage hat " +
-					"das Antwortformat geändert.",
+				"Die Antwort der Anwesenheits-Ansicht enthielt keine auswertbaren Stundeneinträge für diese Woche " +
+					"(nur Referenz-/Schülerstammdaten oder Daten einer anderen Woche). Möglich: für diese Woche/Klasse " +
+					"liegt nichts vor, oder Edupage hat das Antwortformat geändert.",
 			);
 		}
 
-		// Der Referenz-/Namens-Cache dieser Ansicht enthält u. a. die
 		// Klartexte für studentabsent_typeid (z. B. "-9" -> "Entschuldigte
-		// Stunden") - kann in jedem der Blöcke stecken, daher alle absuchen.
+		// Stunden") stecken je nach Format entweder in einem json_dc-Block
+		// (studentabsent_types als {id: {name,short}}) oder in einer
+		// separaten `gi<N>.options={...ciselnik0:{id:{name,short}}}`-
+		// Zuweisung (dort ist studentabsent_types nur eine ID-Liste ohne
+		// Klartexte).
 		let absentTypes: Record<string, string> = {};
 		for (const entry of decoded) {
 			const types = (entry as { studentabsent_types?: Record<string, { name?: string; short?: string }> } | undefined)
 				?.studentabsent_types;
-			if (types) {
+			if (types && !Array.isArray(types)) {
 				for (const [id, info] of Object.entries(types)) {
 					absentTypes[id] = info.name || info.short || id;
 				}
 				break;
+			}
+		}
+		if (Object.keys(absentTypes).length === 0) {
+			for (const text of responseTexts) {
+				const ciselnik0 = extractOptionsCiselnik0(text);
+				if (ciselnik0) {
+					for (const [id, info] of Object.entries(ciselnik0)) {
+						absentTypes[id] = info.name || info.short || id;
+					}
+					break;
+				}
 			}
 		}
 
@@ -687,67 +833,6 @@ export class EdupageSessionDO extends DurableObject<Env> {
 		}
 		items.sort((a, b) => (a.date + a.period).localeCompare(b.date + b.period));
 		return { items };
-	}
-
-	/**
-	 * TEMPORÄR: Debug-Hilfsmittel, um zu verstehen, warum manche Klassen bei
-	 * getAttendance keine Zelldaten liefern (z. B. BEE32A, BIF31A, AIT21V).
-	 * Führt denselben gpid+gcall-Flow wie getAttendance aus, deckt aber jeden
-	 * gefundenen json_dc-Block auf statt ihn zu interpretieren.
-	 */
-	async debugAttendanceRaw(
-		credentials: EdupageCredentials,
-		weekDate: string,
-		classId?: string,
-	): Promise<unknown> {
-		const gpid = await this.getGpid(credentials, "/dashboard/eb.php?mode=attendance");
-
-		let classSwitchResponse: string | undefined;
-		if (classId) {
-			classSwitchResponse = await this.gcall(credentials, gpid, "refresh", { table: "classes", id: classId });
-		}
-		const responseText = await this.gcall(credentials, gpid, "refresh", { date: weekDate });
-
-		const summarize = (label: string, text: string) => {
-			const payloads = extractJsonDcPayloads(text);
-			return {
-				label,
-				responseLength: text.length,
-				responsePreview: text.slice(0, 300),
-				payloadCount: payloads.length,
-				payloads: payloads.map((p, i) => {
-					let decoded: unknown;
-					let error: string | undefined;
-					try {
-						decoded = decodeJsonDc(p);
-					} catch (e) {
-						error = e instanceof Error ? e.message : String(e);
-					}
-					const topKeys = decoded && typeof decoded === "object" ? Object.keys(decoded as object) : undefined;
-					const students = (decoded as { students?: Record<string, unknown> } | undefined)?.students;
-					const studentCount = students ? Object.keys(students).length : undefined;
-					const firstStudentId = students ? Object.keys(students)[0] : undefined;
-					const firstStudentValue = firstStudentId ? students?.[firstStudentId] : undefined;
-					const firstStudentKeys =
-						firstStudentValue && typeof firstStudentValue === "object" ? Object.keys(firstStudentValue) : undefined;
-					return {
-						index: i,
-						error,
-						isAttendanceCellData: decoded ? isAttendanceCellData(decoded) : false,
-						topLevelKeys: topKeys,
-						studentCount,
-						firstStudentId,
-						firstStudentKeys,
-					};
-				}),
-			};
-		};
-
-		return {
-			gpid,
-			classSwitch: classSwitchResponse ? summarize("classSwitch", classSwitchResponse) : undefined,
-			refresh: summarize("refresh", responseText),
-		};
 	}
 
 	/** Escape-Hatch für Edupage-Endpunkte außerhalb des __func/__args-Musters. */
