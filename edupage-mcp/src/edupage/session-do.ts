@@ -280,6 +280,30 @@ function extractJsonDcPayloads(js: string): Array<[unknown[], unknown[]]> {
 }
 
 /**
+ * Prüft strukturell, ob ein dekodiertes json_dc-Payload die Anwesenheits-
+ * Zellen (students[id][datum][stunde] = {...}) trägt, statt z. B. der
+ * (unter demselben "students"-Schlüssel liegenden!) flachen Schülerstamm-
+ * daten students[id] = {classid, firstname, id, lastname, short, ...}, die
+ * Edupage je nach Klasse als zusätzlichen/letzten json_dc-Block mitschickt.
+ * Erkennungsmerkmal: bei Zelldaten sind die Schlüssel der zweiten Ebene
+ * YYYY-MM-DD-Datumsstrings: bei Stammdaten sind es Feldnamen wie "classid".
+ */
+function isAttendanceCellData(
+	value: unknown,
+): value is { students: Record<string, Record<string, Record<string, RawAttendanceCell>>> } {
+	if (!value || typeof value !== "object") return false;
+	const students = (value as Record<string, unknown>).students;
+	if (!students || typeof students !== "object") return false;
+	for (const byDate of Object.values(students)) {
+		if (!byDate || typeof byDate !== "object") return false;
+		return Object.keys(byDate).every((key) => /^\d{4}-\d{2}-\d{2}$/.test(key));
+	}
+	// Leeres students-Objekt (z. B. echte Fehlanzeige für die Woche) - nichts
+	// dagegen einzuwenden, kann nicht als falsch erkannt werden.
+	return true;
+}
+
+/**
  * Reduziert einen rohen curentttGetData-Eintrag auf die für Menschen (bzw.
  * ein LLM) relevanten Felder und löst Fach-/Klassen-/Lehrkraft-/Raum-IDs
  * über `lookup` in Klarnamen auf. Die Rohantwort trägt pro Eintrag komplette
@@ -603,20 +627,42 @@ export class EdupageSessionDO extends DurableObject<Env> {
 					"Antwortformat geändert, oder für diese Woche/Klasse ist nichts hinterlegt.",
 			);
 		}
-		const cellData = decodeJsonDc(payloads[payloads.length - 1]) as {
-			students?: Record<string, Record<string, Record<string, RawAttendanceCell>>>;
-		};
 
-		// Der erste json_dc-Block (falls vorhanden) ist der Namens-/Referenz-
-		// Cache dieser Ansicht und enthält u. a. die Klartexte für
-		// studentabsent_typeid (z. B. "-9" -> "Entschuldigte Stunden").
+		// Wie viele json_dc-Blöcke die Antwort enthält und in welcher
+		// Reihenfolge (Zelldaten vs. Referenz-/Stammdaten-Blöcke) variiert
+		// je nach Klasse - bei manchen Klassen kommt z. B. zusätzlich ein
+		// Schülerstammdaten-Block, der ebenfalls unter "students" liegt.
+		// Daher nicht mehr nach fester Position greifen, sondern jedes
+		// Payload dekodieren und strukturell erkennen, was es ist.
+		const decoded = payloads.map((p) => {
+			try {
+				return decodeJsonDc(p);
+			} catch {
+				return undefined;
+			}
+		});
+
+		const cellData = decoded.find(isAttendanceCellData);
+		if (!cellData) {
+			throw new Error(
+				"Die Antwort der Anwesenheits-Ansicht enthielt keine auswertbaren Stundeneinträge (nur " +
+					"Referenz-/Schülerstammdaten). Möglich: für diese Woche/Klasse liegt nichts vor, oder Edupage hat " +
+					"das Antwortformat geändert.",
+			);
+		}
+
+		// Der Referenz-/Namens-Cache dieser Ansicht enthält u. a. die
+		// Klartexte für studentabsent_typeid (z. B. "-9" -> "Entschuldigte
+		// Stunden") - kann in jedem der Blöcke stecken, daher alle absuchen.
 		let absentTypes: Record<string, string> = {};
-		if (payloads.length > 1) {
-			const refData = decodeJsonDc(payloads[0]) as {
-				studentabsent_types?: Record<string, { name?: string; short?: string }>;
-			};
-			for (const [id, info] of Object.entries(refData.studentabsent_types ?? {})) {
-				absentTypes[id] = info.name || info.short || id;
+		for (const entry of decoded) {
+			const types = (entry as { studentabsent_types?: Record<string, { name?: string; short?: string }> } | undefined)
+				?.studentabsent_types;
+			if (types) {
+				for (const [id, info] of Object.entries(types)) {
+					absentTypes[id] = info.name || info.short || id;
+				}
+				break;
 			}
 		}
 
