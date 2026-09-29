@@ -689,6 +689,67 @@ export class EdupageSessionDO extends DurableObject<Env> {
 		return { items };
 	}
 
+	/**
+	 * TEMPORÄR: Debug-Hilfsmittel, um zu verstehen, warum manche Klassen bei
+	 * getAttendance keine Zelldaten liefern (z. B. BEE32A, BIF31A, AIT21V).
+	 * Führt denselben gpid+gcall-Flow wie getAttendance aus, deckt aber jeden
+	 * gefundenen json_dc-Block auf statt ihn zu interpretieren.
+	 */
+	async debugAttendanceRaw(
+		credentials: EdupageCredentials,
+		weekDate: string,
+		classId?: string,
+	): Promise<unknown> {
+		const gpid = await this.getGpid(credentials, "/dashboard/eb.php?mode=attendance");
+
+		let classSwitchResponse: string | undefined;
+		if (classId) {
+			classSwitchResponse = await this.gcall(credentials, gpid, "refresh", { table: "classes", id: classId });
+		}
+		const responseText = await this.gcall(credentials, gpid, "refresh", { date: weekDate });
+
+		const summarize = (label: string, text: string) => {
+			const payloads = extractJsonDcPayloads(text);
+			return {
+				label,
+				responseLength: text.length,
+				responsePreview: text.slice(0, 300),
+				payloadCount: payloads.length,
+				payloads: payloads.map((p, i) => {
+					let decoded: unknown;
+					let error: string | undefined;
+					try {
+						decoded = decodeJsonDc(p);
+					} catch (e) {
+						error = e instanceof Error ? e.message : String(e);
+					}
+					const topKeys = decoded && typeof decoded === "object" ? Object.keys(decoded as object) : undefined;
+					const students = (decoded as { students?: Record<string, unknown> } | undefined)?.students;
+					const studentCount = students ? Object.keys(students).length : undefined;
+					const firstStudentId = students ? Object.keys(students)[0] : undefined;
+					const firstStudentValue = firstStudentId ? students?.[firstStudentId] : undefined;
+					const firstStudentKeys =
+						firstStudentValue && typeof firstStudentValue === "object" ? Object.keys(firstStudentValue) : undefined;
+					return {
+						index: i,
+						error,
+						isAttendanceCellData: decoded ? isAttendanceCellData(decoded) : false,
+						topLevelKeys: topKeys,
+						studentCount,
+						firstStudentId,
+						firstStudentKeys,
+					};
+				}),
+			};
+		};
+
+		return {
+			gpid,
+			classSwitch: classSwitchResponse ? summarize("classSwitch", classSwitchResponse) : undefined,
+			refresh: summarize("refresh", responseText),
+		};
+	}
+
 	/** Escape-Hatch für Edupage-Endpunkte außerhalb des __func/__args-Musters. */
 	async rawFetch(
 		credentials: EdupageCredentials,

@@ -73,6 +73,23 @@ export class EdupageMcpAgent extends McpAgent<Env, unknown, EdupageCredentials> 
 			},
 		);
 
+		// TEMPORÄR: Debug-Werkzeug zur Fehlersuche, warum manche Klassen bei
+		// edupage_get_attendance keine Zelldaten liefern. Wieder entfernen,
+		// sobald die Ursache gefunden/behoben ist.
+		this.server.tool(
+			"edupage_debug_attendance_raw",
+			"TEMP DEBUG: rohe gcall-Antworten + decodierte json_dc-Block-Zusammenfassungen für die Anwesenheits-Ansicht.",
+			{
+				date: z.string(),
+				classId: z.string().optional(),
+			},
+			async ({ date, classId }: { date: string; classId?: string }) => {
+				const { stub, credentials } = await this.session();
+				const data = await stub.debugAttendanceRaw(credentials, date, classId);
+				return { content: [{ type: "text" as const, text: JSON.stringify(data) }] };
+			},
+		);
+
 		this.server.tool(
 			"edupage_logout",
 			"Löscht die für die aktuell verbundenen Edupage-Zugangsdaten gespeicherte Session, sodass sich der " +
