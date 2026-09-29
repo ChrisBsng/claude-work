@@ -16,6 +16,7 @@ if (path === "/admin" || path === "/admin/") {
 	renderCheckin(root, checkinMatch[1]);
 } else if (dashboardMatch) {
 	root.classList.add("dashboard-app");
+	document.body.classList.add("force-light-theme");
 	renderDashboard(root, dashboardMatch[1]);
 } else {
 	renderLanding(root);

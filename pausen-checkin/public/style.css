@@ -195,6 +195,23 @@ body {
 	max-width: 1200px;
 }
 
+.dashboard-columns {
+	display: grid;
+	grid-template-columns: 1fr 1fr;
+	gap: 24px;
+	align-items: start;
+}
+
+.dashboard-columns table {
+	margin-top: 0;
+}
+
+@media (max-width: 720px) {
+	.dashboard-columns {
+		grid-template-columns: 1fr;
+	}
+}
+
 h1 {
 	font-size: 1.6rem;
 	margin-bottom: 4px;

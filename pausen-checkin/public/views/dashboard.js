@@ -4,6 +4,10 @@ import { getBaseUrl } from "/baseUrl.js";
 
 const POLL_INTERVAL_MS = 5000;
 const STATUS_LABELS = { present: "Anwesend", on_break: "In der Pause", unknown: "Unbekannt" };
+// Ab dieser Teilnehmerzahl wird die Live-Tabelle auf zwei Spalten
+// aufgeteilt, damit auch größere Kurse (bis ~30 Teilnehmer) ohne langes
+// Scrollen auf einen Blick überschaubar bleiben.
+const TWO_COLUMN_THRESHOLD = 12;
 
 function budgetBarClass(usedMinutes, dailyBudget) {
 	const remaining = dailyBudget - usedMinutes;
@@ -40,6 +44,15 @@ function participantRow(participant, dailyBudget, hasBreakTracking, justReturned
 				}
 			</td>
 		</tr>
+	`;
+}
+
+function participantTable(participants, dailyBudget, hasBreakTracking, justReturnedIds) {
+	return `
+		<table>
+			<thead><tr><th>Name</th><th>Status</th>${hasBreakTracking ? "<th>Pausenbudget</th><th></th>" : ""}</tr></thead>
+			<tbody>${participants.map((p) => participantRow(p, dailyBudget, hasBreakTracking, justReturnedIds.has(p.id))).join("")}</tbody>
+		</table>
 	`;
 }
 
@@ -195,13 +208,28 @@ export async function renderDashboard(root, dashboardToken) {
 		});
 
 		const liveTable = root.querySelector("#live-table");
-		liveTable.innerHTML =
-			data.participants.length === 0
-				? '<p class="muted">Noch niemand eingecheckt.</p>'
-				: `<table>
-					<thead><tr><th>Name</th><th>Status</th>${data.course.hasBreakTracking ? "<th>Pausenbudget</th><th></th>" : ""}</tr></thead>
-					<tbody>${data.participants.map((p) => participantRow(p, data.course.dailyBreakBudgetMinutes, data.course.hasBreakTracking, justReturnedIds.has(p.id))).join("")}</tbody>
-				</table>`;
+		if (data.participants.length === 0) {
+			liveTable.innerHTML = '<p class="muted">Noch niemand eingecheckt.</p>';
+		} else if (data.participants.length > TWO_COLUMN_THRESHOLD) {
+			// Zwei Spalten (je ~halb so viele Zeilen), damit auch größere
+			// Kurse ohne langes Scrollen übersichtlich bleiben.
+			const mid = Math.ceil(data.participants.length / 2);
+			const left = data.participants.slice(0, mid);
+			const right = data.participants.slice(mid);
+			liveTable.innerHTML = `
+				<div class="dashboard-columns">
+					${participantTable(left, data.course.dailyBreakBudgetMinutes, data.course.hasBreakTracking, justReturnedIds)}
+					${participantTable(right, data.course.dailyBreakBudgetMinutes, data.course.hasBreakTracking, justReturnedIds)}
+				</div>
+			`;
+		} else {
+			liveTable.innerHTML = participantTable(
+				data.participants,
+				data.course.dailyBreakBudgetMinutes,
+				data.course.hasBreakTracking,
+				justReturnedIds,
+			);
+		}
 		return true;
 	}
 
