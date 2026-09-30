@@ -335,17 +335,33 @@ function extractBalancedObjectText(js: string, fromIndex: number): string | unde
  * `.then(function(f){return f(`-Aufruf heraus (die vorausgehenden Argumente
  * sind schlichte Bezeichner ohne Klammern, daher reicht "erstes { danach").
  */
-function extractInitModulePayload(js: string): unknown {
+// Eine Antwort kann MEHRERE solcher requireAsync(...).then(function(f){return
+// f(...)})-Aufrufe enthalten (z. B. wenn neben der Anwesenheits-Tabelle noch
+// weitere Ribbon-Untermenüs asynchron nachgeladen werden - beobachtet bei
+// einem Account mit vielen unterrichteten Klassen). Nur den ERSTEN Treffer
+// zu nehmen kann daher am eigentlichen Zelldaten-Objekt vorbeigreifen, wenn
+// dieses nicht der erste solche Aufruf in der Antwort ist - deshalb werden
+// alle Treffer eingesammelt und der Aufrufer prüft jeden einzeln.
+function extractInitModulePayloads(js: string): unknown[] {
 	const marker = ".then(function(f){return f(";
-	const markerIdx = js.indexOf(marker);
-	if (markerIdx === -1) return undefined;
-	const objText = extractBalancedObjectText(js, markerIdx + marker.length);
-	if (!objText) return undefined;
-	try {
-		return JSON.parse(objText);
-	} catch {
-		return undefined;
+	const payloads: unknown[] = [];
+	let searchFrom = 0;
+	while (true) {
+		const markerIdx = js.indexOf(marker, searchFrom);
+		if (markerIdx === -1) break;
+		const objText = extractBalancedObjectText(js, markerIdx + marker.length);
+		if (objText) {
+			try {
+				payloads.push(JSON.parse(objText));
+			} catch {
+				// Kein JSON (z. B. ein anderer, nicht-objektförmiger f(...)-Aufruf) - überspringen.
+			}
+			searchFrom = markerIdx + marker.length + objText.length;
+		} else {
+			searchFrom = markerIdx + marker.length;
+		}
 	}
+	return payloads;
 }
 
 /**
@@ -757,7 +773,7 @@ export class EdupageSessionDO extends DurableObject<Env> {
 
 		// Beide Antworten werden aufgehoben (nicht nur die letzte!): ein
 		// Klassenwechsel liefert die echten Zellendaten oft schon in SEINER
-		// EIGENEN Antwort mit (siehe extractInitModulePayload), nicht erst
+		// EIGENEN Antwort mit (siehe extractInitModulePayloads), nicht erst
 		// in der nachfolgenden Datums-Refresh-Antwort.
 		const responseTexts: string[] = [];
 		if (classId) {
@@ -781,8 +797,7 @@ export class EdupageSessionDO extends DurableObject<Env> {
 					// Kaputtes/unerwartetes Payload - überspringen.
 				}
 			}
-			const initModulePayload = extractInitModulePayload(text);
-			if (initModulePayload !== undefined) decoded.push(initModulePayload);
+			decoded.push(...extractInitModulePayloads(text));
 		}
 		if (decoded.length === 0) {
 			throw new Error(
