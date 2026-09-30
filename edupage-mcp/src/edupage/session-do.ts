@@ -26,6 +26,16 @@ interface EdupageSession {
 	loggedInAt: number;
 }
 
+// Edupage invalidiert Sessions serverseitig nach relativ kurzer Zeit (genaue
+// Dauer unbekannt/undokumentiert, beobachtet: bereits nach einer guten
+// Stunde ungenutzt sowie über Nacht). Eine abgelaufene Session äußert sich
+// nicht zuverlässig über HTTP 401/403, sondern z. T. als stille Leerantwort
+// (curentttGetData) oder als Redirect auf die Login-Seite (Dashboard-
+// Seitenaufrufe) - siehe ensureSession/getGpid. Um nicht auf jeden Tool-
+// Aufruf ein eigenes "bitte neu verbinden" abzuwälzen, wird eine gespeicherte
+// Session proaktiv verworfen, sobald sie älter als dieses Limit ist.
+const SESSION_MAX_AGE_MS = 20 * 60 * 1000;
+
 // Bekannte Edupage-Rollenpräfixe -> Tabellenname für curentttGetData.
 // Nur "Ucitel" (Lehrkraft) ist gegen eine echte Instanz verifiziert; die
 // übrigen sind plausible Vermutungen (gleiches Namensschema) und werden
@@ -480,7 +490,10 @@ export class EdupageSessionDO extends DurableObject<Env> {
 	}
 
 	private async ensureSession(credentials: EdupageCredentials): Promise<EdupageSession> {
-		return (await this.loadSession()) ?? this.login(credentials).then(() => this.session as EdupageSession);
+		const stored = await this.loadSession();
+		if (stored && Date.now() - stored.loggedInAt < SESSION_MAX_AGE_MS) return stored;
+		await this.login(credentials);
+		return this.session as EdupageSession;
 	}
 
 	/** Loggt sich mit den übergebenen Zugangsdaten ein. */
@@ -694,17 +707,33 @@ export class EdupageSessionDO extends DurableObject<Env> {
 	 */
 	private async getGpid(credentials: EdupageCredentials, path: string): Promise<string> {
 		const baseUrl = this.buildBaseUrl(credentials.domain);
-		const session = await this.ensureSession(credentials);
-		const response = await fetch(`${baseUrl}${path}`, { headers: { Cookie: session.cookie } });
-		const html = await response.text();
-		const matches = [...html.matchAll(/id=["']gip(\d+)["']/g)];
-		if (matches.length === 0) {
+		const fetchGpid = async (session: EdupageSession) => {
+			const response = await fetch(`${baseUrl}${path}`, { headers: { Cookie: session.cookie } });
+			const html = await response.text();
+			const matches = [...html.matchAll(/id=["']gip(\d+)["']/g)];
+			return matches.length > 0 ? matches[matches.length - 1][1] : null;
+		};
+
+		let session = await this.ensureSession(credentials);
+		let gpid = await fetchGpid(session);
+		if (gpid === null) {
+			// Kein gip<N> gefunden heißt meist: auf eine Login-Seite umgeleitet
+			// worden, weil die Session zwischen dem Altersabgleich in
+			// ensureSession und diesem Request bereits invalidiert wurde (oder
+			// serverseitig unabhängig vom Alter abgelaufen ist). Einmalig neu
+			// einloggen und erneut versuchen, bevor wir das dem Aufrufer als
+			// "Modul nicht verfügbar" melden.
+			await this.login(credentials);
+			session = await this.loadSession().then((s) => s as EdupageSession);
+			gpid = await fetchGpid(session);
+		}
+		if (gpid === null) {
 			throw new Error(
 				`Konnte keine Gadget-ID (gpid) auf "${path}" finden. Entweder hat Edupage das Seitenlayout ` +
 					"geändert, oder dieses Modul ist für den Account nicht verfügbar/aktiviert.",
 			);
 		}
-		return matches[matches.length - 1][1];
+		return gpid;
 	}
 
 	/**
