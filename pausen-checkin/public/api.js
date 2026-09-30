@@ -106,6 +106,8 @@ export const api = {
 			method: "POST",
 			headers: { Authorization: `Bearer ${token}` },
 		}),
+	deleteParticipant: (token, participantId) =>
+		request(`/api/admin/participants/${participantId}`, { method: "DELETE", headers: { Authorization: `Bearer ${token}` } }),
 
 	listImages: (token) => request("/api/admin/images", { headers: { Authorization: `Bearer ${token}` } }),
 	uploadImage: async (token, file) => {
