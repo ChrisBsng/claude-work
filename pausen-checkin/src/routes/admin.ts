@@ -534,11 +534,24 @@ adminRouter.patch("/groups/:groupId", requireAdmin, async (request: IRequest, en
 
 adminRouter.delete("/groups/:groupId", requireAdmin, async (request: IRequest, env: Env) => {
 	const groupId = Number(request.params.groupId);
-	await env.DB.batch([
-		env.DB.prepare("UPDATE participants SET group_id = NULL WHERE group_id = ?1").bind(groupId),
-		env.DB.prepare("DELETE FROM groups WHERE id = ?1").bind(groupId),
-	]);
-	return Response.json({ deletedId: groupId });
+
+	const { count } = (await env.DB.prepare("SELECT COUNT(*) AS count FROM participants WHERE group_id = ?1")
+		.bind(groupId)
+		.first<{ count: number }>())!;
+	if (count > 0) {
+		return Response.json(
+			{
+				error: `Gruppe kann nicht gelöscht werden: ${count} Teilnehmer ${count === 1 ? "ist" : "sind"} ihr noch zugeordnet. Bitte zuerst umgruppieren.`,
+			},
+			{ status: 409 },
+		);
+	}
+
+	const deleted = await env.DB.prepare("DELETE FROM groups WHERE id = ?1 RETURNING id").bind(groupId).first<{ id: number }>();
+	if (!deleted) {
+		return Response.json({ error: "Gruppe nicht gefunden" }, { status: 404 });
+	}
+	return Response.json({ deletedId: deleted.id });
 });
 
 // --- Teilnehmer (Admin-Verwaltung) ---
@@ -642,6 +655,17 @@ adminRouter.post("/participants/:id/reset-password", requireAdmin, async (reques
 	}
 
 	return Response.json({ ok: true });
+});
+
+// Löscht den Teilnehmer vollständig, inkl. seiner Check-in-Events und
+// Worklog-Einträge (ON DELETE CASCADE in den Migrationen).
+adminRouter.delete("/participants/:id", requireAdmin, async (request: IRequest, env: Env) => {
+	const participantId = Number(request.params.id);
+	const deleted = await env.DB.prepare("DELETE FROM participants WHERE id = ?1 RETURNING id").bind(participantId).first<{ id: number }>();
+	if (!deleted) {
+		return Response.json({ error: "Teilnehmer nicht gefunden" }, { status: 404 });
+	}
+	return Response.json({ deletedId: deleted.id });
 });
 
 // --- Projekttage & Worklog ---

@@ -752,9 +752,34 @@ async function renderCourseParticipantsTab(container, token, course, { handleAut
 				<td>${participant.name}</td>
 				<td>${participant.groupName ?? "–"}</td>
 				<td>${new Date(participant.createdAt).toLocaleString("de-DE")}</td>
-				<td><button type="button" class="secondary" data-edit data-write-action>Bearbeiten</button></td>
+				<td>
+					<button type="button" class="secondary" data-edit data-write-action>Bearbeiten</button>
+					<button
+						type="button"
+						class="secondary"
+						data-delete
+						data-write-action
+						title="Teilnehmer löschen"
+						style="color: var(--color-danger); border-color: var(--color-danger);"
+					>
+						🗑️
+					</button>
+				</td>
 			`;
 			tr.querySelector("[data-edit]").addEventListener("click", renderEdit);
+			tr.querySelector("[data-delete]").addEventListener("click", async () => {
+				const confirmed = window.confirm(
+					`Teilnehmer "${participant.name}" endgültig löschen? Alle Check-in- und Worklog-Daten dieser Person gehen dabei verloren. Das kann nicht rückgängig gemacht werden.`,
+				);
+				if (!confirmed) return;
+				try {
+					await api.deleteParticipant(token, participant.id);
+					tr.remove();
+				} catch (error) {
+					if (handleAuthError(error)) return;
+					window.alert(error.message);
+				}
+			});
 		};
 
 		const renderEdit = () => {
@@ -874,12 +899,23 @@ async function renderCourseGroupsTab(container, token, course, { handleAuthError
 
 		groups.forEach((group) => {
 			const tr = document.createElement("tr");
+			const canDelete = group.memberCount === 0;
 			tr.innerHTML = `
 				<td><input type="text" value="${group.name}" maxlength="${MAX_TEXT_INPUT_LENGTH}" data-name-input data-write-action /></td>
 				<td>${group.memberCount}</td>
 				<td>
 					<button type="button" class="secondary" data-rename data-write-action>Umbenennen</button>
-					<button type="button" class="secondary" data-delete data-write-action style="color: var(--color-danger); border-color: var(--color-danger);">Löschen</button>
+					<button
+						type="button"
+						class="secondary"
+						data-delete
+						data-write-action
+						${canDelete ? "" : "disabled"}
+						title="${canDelete ? "Gruppe löschen" : "Kann nicht gelöscht werden: noch Teilnehmer zugeordnet"}"
+						style="color: var(--color-danger); border-color: var(--color-danger);"
+					>
+						Löschen
+					</button>
 				</td>
 			`;
 			tr.querySelector("[data-rename]").addEventListener("click", async () => {
@@ -893,9 +929,7 @@ async function renderCourseGroupsTab(container, token, course, { handleAuthError
 				}
 			});
 			tr.querySelector("[data-delete]").addEventListener("click", async () => {
-				const confirmed = window.confirm(
-					`Gruppe "${group.name}" löschen? Mitglieder verlieren ihre Gruppenzuordnung (bleiben aber registriert).`,
-				);
+				const confirmed = window.confirm(`Gruppe "${group.name}" endgültig löschen?`);
 				if (!confirmed) return;
 				try {
 					await api.deleteGroup(token, group.id);
