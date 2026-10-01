@@ -2,7 +2,9 @@ import { api } from "/api.js";
 import { renderBrandHeader } from "/brandHeader.js";
 import { getBaseUrl } from "/baseUrl.js";
 
-const POLL_INTERVAL_MS = 5000;
+// 15s statt 5s, zusätzlich pausiert via Page Visibility API (siehe unten),
+// um die D1-Lesekosten des Live-Pollings spürbar zu senken.
+const POLL_INTERVAL_MS = 15000;
 const STATUS_LABELS = { present: "Anwesend", on_break: "In der Pause", unknown: "Unbekannt" };
 // Ab dieser Teilnehmerzahl wird die Live-Tabelle auf zwei Spalten
 // aufgeteilt, damit auch größere Kurse (bis ~30 Teilnehmer) ohne langes
@@ -237,5 +239,15 @@ export async function renderDashboard(root, dashboardToken) {
 	if (course.hasBreakTracking) {
 		await renderHistorySection(root.querySelector("#history-section"), dashboardToken, course);
 	}
-	setInterval(loadLive, POLL_INTERVAL_MS);
+
+	// Im Hintergrund (Tab minimiert/gewechselt) wird nicht gepollt – spart
+	// D1-Lesekosten, besonders relevant da ein Dashboard-Tab oft dauerhaft
+	// offen bleibt. Beim Zurückkehren sofort aktualisieren.
+	document.addEventListener("visibilitychange", () => {
+		if (!document.hidden) loadLive();
+	});
+	setInterval(() => {
+		if (document.hidden) return;
+		loadLive();
+	}, POLL_INTERVAL_MS);
 }

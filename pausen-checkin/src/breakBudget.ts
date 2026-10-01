@@ -116,6 +116,19 @@ export async function fetchRecentParticipantEvents(db: D1Database, participantId
 	return results.reverse();
 }
 
+// Nur Events der letzten 2 Tage (UTC) sind für den heutigen Live-Status
+// relevant (siehe computeUsedMinutesForDate: eine Pause zählt nur zu dem
+// Tag, an dem sie begann, und eine offene Pause nur dann bis "jetzt", wenn
+// sie heute begann). 2 Tage statt 1 sind eine großzügige, zeitzonenfeste
+// Marge (deckt auch extreme UTC-Offsets ab), ohne das Verhalten zu ändern.
+// Diese Grenze erlaubt einen indexgestützten Range-Scan über
+// idx_checkin_events_course_occurred statt eines vollen Tabellen-Scans der
+// kompletten Kurs-Historie – entscheidend, da diese Funktion alle 5s von
+// jedem offenen Dashboard-Tab aufgerufen wird.
+function recentCutoffIso(): string {
+	return new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString();
+}
+
 // Eine Abfrage für den gesamten Kurs (statt einer Query pro Teilnehmer),
 // gruppiert per Fensterfunktion auf die letzten N Events je Teilnehmer.
 // Für die häufig gepollte Live-Ansicht (aktueller Status/heutiges Budget).
@@ -129,11 +142,11 @@ export async function fetchRecentCourseEventsByParticipant(
 				SELECT participant_id, event_type, occurred_at,
 					ROW_NUMBER() OVER (PARTITION BY participant_id ORDER BY occurred_at DESC) AS rn
 				FROM checkin_events
-				WHERE course_id = ?1
+				WHERE course_id = ?1 AND occurred_at >= ?3
 			) WHERE rn <= ?2
 			ORDER BY participant_id ASC, occurred_at ASC`,
 		)
-		.bind(courseId, RECENT_EVENTS_PER_PARTICIPANT)
+		.bind(courseId, RECENT_EVENTS_PER_PARTICIPANT, recentCutoffIso())
 		.all<CheckinEventRow & { participant_id: number }>();
 
 	return groupByParticipant(results);
