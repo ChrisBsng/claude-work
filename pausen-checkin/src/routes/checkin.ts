@@ -9,6 +9,11 @@ import { isValidDateString, OVERTIME_WARNING_TOLERANCE_MINUTES } from "../worklo
 
 const PARTICIPANT_TOKEN_BYTES = 20;
 const MIN_PASSWORD_LENGTH = 4;
+// Serverseitige Sitzungs-Ablaufzeit: schützt vor vergessenen, im
+// Hintergrund offenen Tabs, die sonst unbegrenzt weiterpollen würden (z.B.
+// übers Wochenende) – wirkt auch auf bereits offene Tabs mit älterem
+// Frontend-Code, da deren bestehende 401-Behandlung das Polling stoppt.
+const PARTICIPANT_SESSION_MAX_AGE_MS = 12 * 60 * 60 * 1000;
 
 interface CourseRow {
 	id: number;
@@ -32,6 +37,7 @@ interface ParticipantRow {
 	access_token: string;
 	password_hash: string | null;
 	group_id: number | null;
+	token_issued_at: string;
 }
 
 async function getActiveCourseByCheckinCode(db: D1Database, checkinCode: string): Promise<CourseRow | null> {
@@ -48,7 +54,9 @@ async function getActiveCourseByCheckinCode(db: D1Database, checkinCode: string)
 
 async function getParticipantByToken(db: D1Database, courseId: number, accessToken: string): Promise<ParticipantRow | null> {
 	return db
-		.prepare("SELECT id, name, access_token, password_hash, group_id FROM participants WHERE course_id = ?1 AND access_token = ?2")
+		.prepare(
+			"SELECT id, name, access_token, password_hash, group_id, token_issued_at FROM participants WHERE course_id = ?1 AND access_token = ?2",
+		)
 		.bind(courseId, accessToken)
 		.first<ParticipantRow>();
 }
@@ -65,6 +73,10 @@ async function requireParticipant(
 	const participant = await getParticipantByToken(env.DB, course.id, accessToken);
 	if (!participant) {
 		return { error: Response.json({ error: "Teilnehmer nicht gefunden" }, { status: 404 }) };
+	}
+	const sessionAgeMs = Date.now() - new Date(participant.token_issued_at ?? 0).getTime();
+	if (sessionAgeMs > PARTICIPANT_SESSION_MAX_AGE_MS) {
+		return { error: Response.json({ error: "Sitzung abgelaufen, bitte erneut anmelden." }, { status: 401 }) };
 	}
 	return { participant };
 }
@@ -199,7 +211,7 @@ checkinRouter.post("/:checkinCode/login", async (request: IRequest, env: Env) =>
 		let created: { id: number; name: string } | null;
 		try {
 			created = await env.DB.prepare(
-				"INSERT INTO participants (course_id, name, access_token, password_hash, group_id) VALUES (?1, ?2, ?3, ?4, ?5) RETURNING id, name",
+				"INSERT INTO participants (course_id, name, access_token, password_hash, group_id, token_issued_at) VALUES (?1, ?2, ?3, ?4, ?5, strftime('%Y-%m-%dT%H:%M:%fZ','now')) RETURNING id, name",
 			)
 				.bind(course.id, name, accessToken, passwordHash, group!.id)
 				.first<{ id: number; name: string }>();
@@ -212,13 +224,20 @@ checkinRouter.post("/:checkinCode/login", async (request: IRequest, env: Env) =>
 			.run();
 	} else if (!existing.password_hash) {
 		const passwordHash = await hashParticipantPassword(password);
-		await env.DB.prepare("UPDATE participants SET password_hash = ?1 WHERE id = ?2").bind(passwordHash, existing.id).run();
+		await env.DB.prepare(
+			"UPDATE participants SET password_hash = ?1, token_issued_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?2",
+		)
+			.bind(passwordHash, existing.id)
+			.run();
 		participant = { id: existing.id, name: existing.name };
 		accessToken = existing.access_token;
 	} else {
 		if (!(await verifyParticipantPassword(existing.password_hash, password))) {
 			return Response.json({ error: "Falsches Passwort" }, { status: 401 });
 		}
+		await env.DB.prepare("UPDATE participants SET token_issued_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?1")
+			.bind(existing.id)
+			.run();
 		participant = { id: existing.id, name: existing.name };
 		accessToken = existing.access_token;
 	}
