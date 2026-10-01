@@ -58,7 +58,20 @@ async function serializeCourse(db: D1Database, course: CourseRow) {
 
 export const dashboardRouter = Router({ base: "/api/dashboard" });
 
+// Kurze Edge-Cache-TTL auf die Live-Daten: Dashboard-Inhalt ist für alle
+// Betrachter desselben dashboardToken identisch, daher teilen sich
+// gleichzeitige Polls (mehrere offene Tabs, auch mit älterem, schnellerem
+// Polling-Takt) innerhalb dieses Fensters einen einzigen D1-Query statt
+// jeweils eigene auszulösen. 15s ist ein Kompromiss: spürbar günstiger,
+// aber die Anzeige bleibt für eine von Menschen beobachtete Live-Ansicht
+// noch praktisch aktuell.
+const DASHBOARD_CACHE_SECONDS = 15;
+
 dashboardRouter.get("/:dashboardToken", async (request: IRequest, env: Env) => {
+	const cache = caches.default;
+	const cached = await cache.match(request);
+	if (cached) return cached;
+
 	const course = await getCourseByDashboardToken(env.DB, request.params.dashboardToken);
 	if (!course) {
 		return Response.json({ error: "Dashboard nicht gefunden" }, { status: 404 });
@@ -82,7 +95,12 @@ dashboardRouter.get("/:dashboardToken", async (request: IRequest, env: Env) => {
 		return { id: participant.id, name: participant.name, status, ...budget };
 	});
 
-	return Response.json({ course: await serializeCourse(env.DB, course), participants: participantsWithBudget });
+	const response = Response.json(
+		{ course: await serializeCourse(env.DB, course), participants: participantsWithBudget },
+		{ headers: { "Cache-Control": `public, max-age=${DASHBOARD_CACHE_SECONDS}` } },
+	);
+	await cache.put(request, response.clone());
+	return response;
 });
 
 // Welche Kalendertage haben überhaupt aufgezeichnete Check-in/-out-Events?
