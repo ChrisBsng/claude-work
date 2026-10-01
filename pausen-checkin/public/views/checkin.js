@@ -2,7 +2,9 @@ import { api } from "/api.js";
 import { renderBrandHeader } from "/brandHeader.js";
 import { MAX_TEXT_INPUT_LENGTH, truncateLabel } from "/textUtils.js";
 
-const POLL_INTERVAL_MS = 5000;
+// 15s statt 5s, zusätzlich pausiert via Page Visibility API (siehe unten),
+// um die D1-Lesekosten des Live-Pollings spürbar zu senken.
+const POLL_INTERVAL_MS = 15000;
 
 function tokenKey(checkinCode) {
 	return `pausenCheckin.access.${checkinCode}`;
@@ -259,13 +261,14 @@ function renderStatus(root, checkinCode, course, accessToken, data) {
 		root.querySelector("#choose-break")?.addEventListener("click", () => performToggle("on_break"));
 		root.querySelector("#open-worklog")?.addEventListener("click", () => {
 			clearInterval(pollTimer);
+			document.removeEventListener("visibilitychange", onVisibilityChange);
 			renderWorklogPanel(root, checkinCode, course, accessToken, () => renderStatus(root, checkinCode, course, accessToken, currentData));
 		});
 	}
 
 	paint(data);
 
-	pollTimer = setInterval(async () => {
+	async function refresh() {
 		if (actionInFlight) return;
 		try {
 			const me = await api.getMe(checkinCode, accessToken);
@@ -274,9 +277,23 @@ function renderStatus(root, checkinCode, course, accessToken, data) {
 			if (error.status === 401 || error.status === 404) {
 				localStorage.removeItem(tokenKey(checkinCode));
 				clearInterval(pollTimer);
+				document.removeEventListener("visibilitychange", onVisibilityChange);
 				renderLogin(root, checkinCode, course);
 			}
 		}
+	}
+
+	// Im Hintergrund (Tab minimiert/gewechselt) wird nicht gepollt – spart
+	// D1-Lesekosten. Beim Zurückkehren sofort aktualisieren, statt bis zum
+	// nächsten Intervall zu warten.
+	function onVisibilityChange() {
+		if (!document.hidden) refresh();
+	}
+	document.addEventListener("visibilitychange", onVisibilityChange);
+
+	pollTimer = setInterval(() => {
+		if (document.hidden) return;
+		refresh();
 	}, POLL_INTERVAL_MS);
 }
 
