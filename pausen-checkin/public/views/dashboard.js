@@ -189,7 +189,12 @@ export async function renderDashboard(root, dashboardToken) {
 		try {
 			data = await api.getDashboard(dashboardToken);
 		} catch (error) {
-			root.innerHTML = `<h1>Nicht gefunden</h1><p class="error">${error.message}</p>`;
+			// Nur bei einem einzelnen fehlgeschlagenen Poll NICHT die ganze Seite
+			// durch eine Fehlermeldung ersetzen: das würde die Elemente zerstören,
+			// die der nächste erfolgreiche Poll aktualisiert, und die Anzeige
+			// bliebe dauerhaft hängen, bis manuell neu geladen wird. Stattdessen
+			// einfach beim nächsten Intervall erneut versuchen.
+			console.error("Dashboard-Update fehlgeschlagen, nächster Versuch beim nächsten Poll:", error);
 			return false;
 		}
 
@@ -240,14 +245,12 @@ export async function renderDashboard(root, dashboardToken) {
 		await renderHistorySection(root.querySelector("#history-section"), dashboardToken, course);
 	}
 
-	// Im Hintergrund (Tab minimiert/gewechselt) wird nicht gepollt – spart
-	// D1-Lesekosten, besonders relevant da ein Dashboard-Tab oft dauerhaft
-	// offen bleibt. Beim Zurückkehren sofort aktualisieren.
-	document.addEventListener("visibilitychange", () => {
-		if (!document.hidden) loadLive();
-	});
-	setInterval(() => {
-		if (document.hidden) return;
-		loadLive();
-	}, POLL_INTERVAL_MS);
+	// Bewusst kein Pausieren über die Page Visibility API: der serverseitige
+	// Edge-Cache (siehe dashboard.ts, DASHBOARD_CACHE_SECONDS) deckelt die
+	// D1-Kosten bereits unabhängig vom Poll-Verhalten des Clients. Eine
+	// zusätzliche Client-Pause hätte hier nur noch Zuverlässigkeitsrisiko
+	// ohne nennenswerten Kostenvorteil (document.hidden kehrt nicht in jeder
+	// Browser-/OS-Kombination zuverlässig zurück auf "sichtbar", wodurch das
+	// Dashboard sonst unbemerkt hängenbleiben kann).
+	setInterval(loadLive, POLL_INTERVAL_MS);
 }
