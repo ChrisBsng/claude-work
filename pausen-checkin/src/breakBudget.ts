@@ -57,6 +57,39 @@ export function computeUsedMinutesForDate(
 	return { usedMinutes: Math.max(0, Math.round(usedMs / 60000)), isOnBreakNow };
 }
 
+// Wie computeUsedMinutesForDate, aber für ALLE Tage in einem Durchgang statt
+// die komplette Event-Liste pro Tag erneut zu scannen. Ohne das skaliert der
+// Excel-Export quadratisch (Teilnehmer × Tage × Events) und reißt bei
+// größeren/länger laufenden Kursen das Cloudflare-Workers-CPU-Zeit-Limit
+// (führte zu "exceededCpu"/503). Ergebnis in Millisekunden je Kalendertag,
+// identische Rundung wie computeUsedMinutesForDate erfolgt erst beim Lesen.
+export function computeUsedMinutesByDate(events: CheckinEventRow[], timezone: string): Map<string, number> {
+	const msByDate = new Map<string, number>();
+	let openBreakStart: Date | null = null;
+
+	for (const event of events) {
+		const occurredAt = new Date(event.occurred_at);
+		if (event.event_type === "check_out") {
+			openBreakStart = occurredAt;
+		} else if (event.event_type === "check_in" && openBreakStart) {
+			const day = localDateString(openBreakStart, timezone);
+			msByDate.set(day, (msByDate.get(day) ?? 0) + (occurredAt.getTime() - openBreakStart.getTime()));
+			openBreakStart = null;
+		}
+	}
+
+	// Offene Pause (kein folgender Check-in) zählt nur für den heutigen Tag
+	// bis jetzt weiter – identisch zur Logik in computeUsedMinutesForDate.
+	if (openBreakStart) {
+		const day = localDateString(openBreakStart, timezone);
+		if (day === localDateString(new Date(), timezone)) {
+			msByDate.set(day, (msByDate.get(day) ?? 0) + (Date.now() - openBreakStart.getTime()));
+		}
+	}
+
+	return msByDate;
+}
+
 export function computeBreakBudgetFromEvents(
 	events: CheckinEventRow[],
 	dailyBudgetMinutes: number,
