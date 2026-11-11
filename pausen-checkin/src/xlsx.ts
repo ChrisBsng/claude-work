@@ -25,7 +25,13 @@ export function buildXlsx(sheets: XlsxSheet[]): Uint8Array {
 		files[`xl/worksheets/sheet${index + 1}.xml`] = strToU8(buildSheetXml(sheet));
 	});
 
-	return zipSync(files, { level: 6 });
+	// level 0 (nur "store", keine Deflate-Kompression): der Export ist eine
+	// einmalig herunterladbare Datei, Dateigröße spielt praktisch keine
+	// Rolle – CPU-Zeit dagegen schon, da Cloudflare Workers ein hartes
+	// CPU-Zeit-Limit pro Request hat. Deflate (Level 6) hat bei größeren
+	// Kursen zu "exceededCpu" (503) geführt; Level 0 ist in Benchmarks auf
+	// vergleichbaren Datenmengen >10x schneller.
+	return zipSync(files, { level: 0 });
 }
 
 function escapeXml(value: string): string {
