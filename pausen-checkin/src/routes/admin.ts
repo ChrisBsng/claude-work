@@ -5,7 +5,7 @@ import {
 	addDaysToDateString,
 	computeBreakBudgetFromEvents,
 	computeTotalBreakMinutes,
-	computeUsedMinutesForDate,
+	computeUsedMinutesByDate,
 	fetchAllCourseEventsByParticipant,
 	localDateString,
 } from "../breakBudget";
@@ -361,8 +361,12 @@ adminRouter.get("/courses/:id/export.xlsx", requireReadAccess, async (request: I
 	const breakRows: XlsxCell[][] = [];
 	for (const participant of participants) {
 		const events = eventsByParticipant.get(participant.id) ?? [];
+		// Einmal pro Teilnehmer über die Events gehen statt pro Tag erneut zu
+		// scannen – sonst skaliert der Export quadratisch (Teilnehmer × Tage ×
+		// Events) und reißt bei größeren Kursen das CPU-Zeit-Limit.
+		const msByDate = computeUsedMinutesByDate(events, course.timezone);
 		for (const date of dates) {
-			const { usedMinutes } = computeUsedMinutesForDate(events, course.timezone, date);
+			const usedMinutes = Math.max(0, Math.round((msByDate.get(date) ?? 0) / 60000));
 			breakRows.push([
 				participant.name,
 				date,
