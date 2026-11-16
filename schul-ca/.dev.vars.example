@@ -1,0 +1,9 @@
+# Startpasswort für den Admin-Bereich, bis es im Admin-Bereich selbst
+# geändert wird (danach gilt der in der DB gespeicherte PBKDF2-Hash).
+ADMIN_PASSWORD=change-me
+# Langer Zufallswert (z. B. `openssl rand -base64 48`). Daraus werden der
+# Schlüssel zur Verschlüsselung der Root-CA-Private-Keys und der Schlüssel
+# für Session-Tokens abgeleitet. ACHTUNG: Geht er verloren, sind die
+# gespeicherten Root-Keys unbrauchbar; ändert er sich, müssen sie neu
+# importiert werden.
+MASTER_SECRET=change-me-to-a-long-random-value

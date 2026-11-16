@@ -1,0 +1,59 @@
+name: Deploy Schul-CA Worker
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "schul-ca/**"
+      - ".github/workflows/deploy-schul-ca.yml"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: schul-ca
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: schul-ca/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type check
+        run: npx tsc --noEmit
+
+      - name: Unit tests (PKI/Krypto)
+        run: npm test
+
+      - name: Apply D1 migrations
+        run: npx wrangler d1 migrations apply schul-ca-db --remote
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+
+      - name: Deploy to Cloudflare Workers
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: schul-ca
+          secrets: |
+            ADMIN_PASSWORD
+            MASTER_SECRET
+        env:
+          # Eigene Repository-Secrets, damit sie nicht mit denen des Pausen-Tools kollidieren.
+          ADMIN_PASSWORD: ${{ secrets.SCHULCA_ADMIN_PASSWORD }}
+          MASTER_SECRET: ${{ secrets.SCHULCA_MASTER_SECRET }}

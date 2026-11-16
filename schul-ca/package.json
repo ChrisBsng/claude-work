@@ -1,0 +1,30 @@
+{
+	"name": "schul-ca",
+	"private": true,
+	"version": "0.1.0",
+	"engines": {
+		"node": ">=22.0.0"
+	},
+	"scripts": {
+		"dev": "wrangler dev",
+		"deploy": "wrangler deploy",
+		"typecheck": "tsc --noEmit",
+		"test": "esbuild test/pki.test.ts --bundle --platform=node --format=cjs --outfile=.wrangler/pki.test.cjs --log-level=warning && node --test .wrangler/pki.test.cjs",
+		"db:migrations:apply:local": "wrangler d1 migrations apply schul-ca-db --local",
+		"db:migrations:apply:remote": "wrangler d1 migrations apply schul-ca-db --remote",
+		"test:e2e": "esbuild test/e2e.ts --bundle --platform=node --format=esm --outfile=.wrangler/e2e.mjs --log-level=warning --banner:js=\"import{createRequire}from'module';const require=createRequire(import.meta.url);\" && node .wrangler/e2e.mjs"
+	},
+	"devDependencies": {
+		"@cloudflare/workers-types": "^5.20260928.1",
+		"esbuild": "^0.28.2",
+		"typescript": "^5.7.0",
+		"wrangler": "^4.142.0"
+	},
+	"dependencies": {
+		"@peculiar/asn1-schema": "2.11.1",
+		"@peculiar/asn1-x509": "2.11.1",
+		"@peculiar/x509": "^1.12.3",
+		"itty-router": "^5.0.24",
+		"reflect-metadata": "^0.2.2"
+	}
+}
