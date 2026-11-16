@@ -1,6 +1,7 @@
 import { Router } from "itty-router";
 import type { Env } from "./env";
 import { adminRouter } from "./routes/admin";
+import { caRouter } from "./routes/ca";
 import { studentRouter } from "./routes/student";
 
 const router = Router();
@@ -8,6 +9,7 @@ const router = Router();
 router.get("/api/health", () => Response.json({ status: "ok" }));
 router.all("/api/admin/*", adminRouter.fetch);
 router.all("/api/student/*", studentRouter.fetch);
+router.all("/api/ca/*", caRouter.fetch);
 router.all("/api/*", () => Response.json({ error: "Not found" }, { status: 404 }));
 router.all("*", (request: Request, env: Env) => env.ASSETS.fetch(request));
 

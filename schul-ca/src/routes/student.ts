@@ -1,10 +1,11 @@
 import { Router, type IRequest } from "itty-router";
 import { checkPassword, getSetting, issueToken, requireStudent } from "../auth";
 import { createCaptcha, verifyCaptcha } from "../captcha";
-import { sha256Hex } from "../crypto";
+import { generateCode, hashCode, normalizeCode } from "../codes";
 import type { Env } from "../env";
 import { badRequest, fileResponse, MIME, readJson, safeName } from "../http";
 import { analyzeCsr, certPemToDer, PkiError } from "../pki";
+import { randomToken } from "../crypto";
 import { clientIp, rateLimitOk } from "../rateLimit";
 
 export const studentRouter = Router({ base: "/api/student" });
@@ -26,20 +27,6 @@ function validateContact(person: unknown, method: unknown, detail: unknown): { e
 	if (method === "phone" && !/^\+?[0-9 ()\/.-]{6,30}$/.test(d)) return { error: "Bitte eine gültige Telefonnummer angeben." };
 	return { person: p, method: method as ContactMethod, detail: d };
 }
-
-// Abruf-Code: 16 Zeichen aus eindeutigem Alphabet (80 Bit), z. B. K7QM-4TXD-9WPB-2HNC
-const CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-function generateCode(): string {
-	const bytes = crypto.getRandomValues(new Uint8Array(16));
-	const chars = [...bytes].map((b) => CODE_ALPHABET[b % CODE_ALPHABET.length]);
-	return [0, 4, 8, 12].map((i) => chars.slice(i, i + 4).join("")).join("-");
-}
-function normalizeCode(input: unknown): string | null {
-	if (typeof input !== "string") return null;
-	const c = input.toUpperCase().replace(/[^A-Z0-9]/g, "");
-	return c.length === 16 ? c : null;
-}
-const hashCode = (normalized: string) => sha256Hex(`csr-code:${normalized}`);
 
 // Öffentlich: Stammzertifikate (nur das Zertifikat, nie der Key) und Passworthinweis.
 // Öffentlich: Passworthinweis + ob die Schüleroberfläche überhaupt freigeschaltet ist.
@@ -133,12 +120,13 @@ studentRouter.post("/csrs", requireStudent, async (request: IRequest, env: Env) 
 	await env.DB.prepare(
 		"INSERT INTO csrs (root_ca_id, label, csr_pem, csr_subject, key_info, code_hash, contact_person, contact_method, contact_detail) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
 	)
-		.bind(root.id, label, csrPem, info.subject, info.keyInfo, await hashCode(code.replace(/-/g, "")), contact.person, contact.method, contact.detail)
+		.bind(root.id, label, csrPem, info.subject, info.keyInfo, await hashCode(normalizeCode(code)!), contact.person, contact.method, contact.detail)
 		.run();
 	return Response.json({ code, subject: info.subject, keyInfo: info.keyInfo }, { status: 201 });
 });
 
 interface CsrLookupRow {
+	id: number;
 	label: string;
 	csr_subject: string;
 	key_info: string;
@@ -159,7 +147,7 @@ async function lookupByCode(request: IRequest, env: Env, codeInput: unknown): Pr
 	const code = normalizeCode(codeInput);
 	if (!code) return badRequest("Ungültiger Abruf-Code (16 Zeichen, z. B. K7QM-4TXD-9WPB-2HNC).");
 	const row = await env.DB.prepare(
-		`SELECT c.label, c.csr_subject, c.key_info, c.status, c.reject_reason, c.cert_pem, c.not_before, c.not_after, c.submitted_at,
+		`SELECT c.id, c.label, c.csr_subject, c.key_info, c.status, c.reject_reason, c.cert_pem, c.not_before, c.not_after, c.submitted_at,
 		        r.name AS root_name, r.cert_pem AS root_cert_pem
 		 FROM csrs c JOIN root_cas r ON r.id = c.root_ca_id WHERE c.code_hash = ?1`,
 	)
@@ -172,7 +160,11 @@ studentRouter.post("/csrs/lookup", requireStudent, async (request: IRequest, env
 	const body = await readJson<{ code?: string }>(request);
 	const row = await lookupByCode(request, env, body?.code);
 	if (row instanceof Response) return row;
+	const managed = await env.DB.prepare("SELECT public_token, key_encrypted IS NOT NULL AS has_key FROM ca_resources WHERE csr_id = ?1")
+		.bind(row.id)
+		.first<{ public_token: string; has_key: number }>();
 	return Response.json({
+		management: row.status === "issued" ? { enabled: Boolean(managed), token: managed?.public_token ?? null, keyStored: Boolean(managed?.has_key) } : null,
 		label: row.label,
 		subject: row.csr_subject,
 		keyInfo: row.key_info,
@@ -201,3 +193,23 @@ studentRouter.post("/csrs/certificate", requireStudent, async (request: IRequest
 	}
 });
 
+
+// "Ich möchte die Zwischenzertifizierungsstelle hier verwalten": legt die eigene
+// Ressource (öffentliche Klassen-URL) an bzw. entfernt sie samt Anfragen und
+// hinterlegtem Schlüssel wieder.
+studentRouter.post("/csrs/manage", requireStudent, async (request: IRequest, env: Env) => {
+	const body = await readJson<{ code?: string; enable?: boolean }>(request);
+	const row = await lookupByCode(request, env, body?.code);
+	if (row instanceof Response) return row;
+	if (row.status !== "issued") return badRequest("Die Verwaltung ist erst nach Ausstellung des Zwischenzertifikats möglich.", 409);
+
+	if (body?.enable === false) {
+		await env.DB.prepare("DELETE FROM ca_resources WHERE csr_id = ?1").bind(row.id).run();
+		return Response.json({ enabled: false, token: null });
+	}
+	const existing = await env.DB.prepare("SELECT public_token FROM ca_resources WHERE csr_id = ?1").bind(row.id).first<{ public_token: string }>();
+	if (existing) return Response.json({ enabled: true, token: existing.public_token });
+	const token = randomToken(16);
+	await env.DB.prepare("INSERT INTO ca_resources (csr_id, public_token) VALUES (?1, ?2)").bind(row.id, token).run();
+	return Response.json({ enabled: true, token }, { status: 201 });
+});

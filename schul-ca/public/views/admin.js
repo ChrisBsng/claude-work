@@ -166,6 +166,7 @@ function renderCsrDetail(box, csr, templates, root) {
 				<dt>Eingereicht</dt><dd>${esc(formatDate(csr.submittedAt))}</dd>
 				${csr.templateName ? `<dt>Template</dt><dd>${esc(csr.templateName)}</dd>` : ""}
 				${csr.rejectReason ? `<dt>Ablehnungsgrund</dt><dd>${esc(csr.rejectReason)}</dd>` : ""}
+				${csr.management ? `<dt>Verwaltung</dt><dd>aktiv · <a href="/ca/${esc(csr.management.token)}" target="_blank" rel="noopener">Klassen-Seite</a> · ${csr.management.requests} Anfragen · Schlüssel ${csr.management.keyStored ? "hinterlegt" : "nicht hinterlegt"}</dd>` : ""}
 				${csr.status === "issued" ? `<dt>Seriennummer</dt><dd class="mono small">${esc(csr.serialNumber)}</dd><dt>Gültig</dt><dd>${esc(formatDay(csr.notBefore))} – ${esc(formatDay(csr.notAfter))}</dd>` : ""}
 			</dl>
 			<details><summary>CSR (PEM)</summary><pre>${esc(csr.csrPem)}</pre></details>
@@ -206,7 +207,7 @@ function renderCsrDetail(box, csr, templates, root) {
 			</div>`
 					: ""
 			}
-			<div class="actions"><button class="danger secondary" id="delete">CSR löschen</button></div>
+			<div class="actions">${csr.management ? `<button class="secondary" id="unmanage">Verwaltung deaktivieren</button>` : ""}<button class="danger secondary" id="delete">CSR löschen</button></div>
 		</div>`;
 	box.scrollIntoView({ behavior: "smooth" });
 
@@ -251,6 +252,11 @@ function renderCsrDetail(box, csr, templates, root) {
 		});
 	}
 	box.querySelectorAll("[data-cert]").forEach((b) => b.addEventListener("click", () => apiDownload(`/csrs/${csr.id}/certificate?format=${b.dataset.cert}`).catch((e) => alert(e.message))));
+	box.querySelector("#unmanage")?.addEventListener("click", () => {
+		if (confirm("Verwaltung deaktivieren? Klassen-Seite, Anfragen und ein hinterlegter Schlüssel werden gelöscht.")) {
+			run(() => api(`/csrs/${csr.id}/management`, { method: "DELETE" }), root, rerender);
+		}
+	});
 	box.querySelector("#delete").addEventListener("click", () => {
 		if (confirm(`CSR „${csr.label}“ endgültig löschen? Das ausgestellte Zertifikat (falls vorhanden) bleibt gültig, ist aber nicht mehr abrufbar.`)) {
 			run(() => api(`/csrs/${csr.id}`, { method: "DELETE" }), root, rerender);

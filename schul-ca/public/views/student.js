@@ -154,6 +154,47 @@ async function renderLogin(root, box, info) {
 	});
 }
 
+function renderManage(out, r, code, token, onAuthError) {
+	const checkbox = out.querySelector("#manage");
+	const info = out.querySelector("#manageInfo");
+	if (!checkbox) return;
+	const show = (t) => {
+		if (!t) {
+			info.innerHTML = "";
+			return;
+		}
+		const url = `${location.origin}/ca/${t}`;
+		sessionStorage.setItem(`schulCa.owner.${t}`, code);
+		info.innerHTML = `
+			<p class="notice"><strong>Adresse für deine Klasse:</strong><br><a href="${esc(url)}" class="mono">${esc(url)}</a><br>
+			<span class="muted small">Diese Adresse kannst du an die Klasse weitergeben. Den Abruf-Code bitte <strong>nicht</strong> weitergeben – er schaltet den Inhaber-Bereich frei.</span></p>
+			<div class="actions"><a class="button-link" href="${esc(url)}#owner">Verwaltung öffnen</a><button type="button" class="secondary" id="copyUrl">Adresse kopieren</button></div>`;
+		info.querySelector("#copyUrl").addEventListener("click", async (e) => {
+			try {
+				await navigator.clipboard.writeText(url);
+				e.target.textContent = "Kopiert!";
+			} catch {
+				// Zwischenablage nicht verfügbar – Adresse steht als Text da.
+			}
+		});
+	};
+	show(r.management?.token);
+	checkbox.addEventListener("change", async () => {
+		const enable = checkbox.checked;
+		if (!enable && !confirm("Verwaltung deaktivieren? Die Klassen-Seite, alle Anfragen und ein hinterlegter Schlüssel werden gelöscht. Bereits ausgestellte Zertifikate bleiben gültig.")) {
+			checkbox.checked = true;
+			return;
+		}
+		try {
+			const res = await call("/api/student/csrs/manage", { method: "POST", token, body: { code, enable } });
+			show(res.token);
+		} catch (e) {
+			checkbox.checked = !enable;
+			if (!onAuthError(e)) alert(e.message);
+		}
+	});
+}
+
 function renderPortal(root, box, roots) {
 	const token = getToken();
 	const onAuthError = (e) => {
@@ -316,9 +357,15 @@ function renderPortal(root, box, roots) {
 							<button data-cert="chain">Zertifikatskette (.pem)</button>
 							<button class="secondary" data-cert="pem">Nur Zertifikat (.pem)</button>
 							<button class="secondary" data-cert="der">DER (.cer)</button>
+						</div>
+						<div class="manage-box">
+							<label class="check"><input type="checkbox" id="manage" ${r.management?.enabled ? "checked" : ""} /> Ich möchte die Zwischenzertifizierungsstelle hier verwalten.</label>
+							<p class="muted small">Dafür wird eine eigene Seite für deine Klasse angelegt. Mitschüler können dort ohne Anmeldung CSRs einreichen oder ein Quick-Zertifikat anfordern und deine ausgestellten Zertifikate herunterladen. Du gibst jede Anfrage frei; den Schlüssel deiner Zwischen-CA kannst du dort dauerhaft hinterlegen oder bei jeder Freigabe neu hochladen.</p>
+							<div id="manageInfo"></div>
 						</div>`
 						: ""
 				}`;
+			renderManage(out, r, code, token, onAuthError);
 			out.querySelectorAll("[data-cert]").forEach((btn) =>
 				btn.addEventListener("click", () =>
 					download("/api/student/csrs/certificate", { method: "POST", token, body: { code, format: btn.dataset.cert } }).catch((e) => alert(e.message)),

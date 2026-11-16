@@ -323,16 +323,22 @@ interface CsrRow {
 	contact_person: string;
 	contact_method: string;
 	contact_detail: string;
+	ca_token: string | null;
+	ca_key_stored: number | null;
+	ca_requests: number | null;
 }
 
-const CSR_SELECT = `SELECT c.*, r.name AS root_name, t.name AS template_name
-	FROM csrs c JOIN root_cas r ON r.id = c.root_ca_id LEFT JOIN cert_templates t ON t.id = c.template_id`;
+const CSR_SELECT = `SELECT c.*, r.name AS root_name, t.name AS template_name,
+	m.public_token AS ca_token, m.key_encrypted IS NOT NULL AS ca_key_stored,
+	(SELECT COUNT(*) FROM leaf_requests lr WHERE lr.ca_id = m.id) AS ca_requests
+	FROM csrs c LEFT JOIN ca_resources m ON m.csr_id = c.id JOIN root_cas r ON r.id = c.root_ca_id LEFT JOIN cert_templates t ON t.id = c.template_id`;
 
 const serializeCsr = (c: CsrRow, withPem = false) => ({
 	id: c.id,
 	rootCaId: c.root_ca_id,
 	rootName: c.root_name,
 	label: c.label,
+	management: c.ca_token ? { token: c.ca_token, keyStored: Boolean(c.ca_key_stored), requests: c.ca_requests ?? 0 } : null,
 	contactPerson: c.contact_person,
 	contactMethod: c.contact_method,
 	contactDetail: c.contact_detail,
@@ -479,5 +485,11 @@ adminRouter.get("/csrs/:id/certificate", requireAdmin, async (request: IRequest,
 
 adminRouter.delete("/csrs/:id", requireAdmin, async (request: IRequest, env: Env) => {
 	await env.DB.prepare("DELETE FROM csrs WHERE id = ?1").bind(Number(request.params.id)).run();
+	return Response.json({ ok: true });
+});
+
+// Verwaltung durch den Inhaber deaktivieren (löscht Klassen-URL, gespeicherten Schlüssel und Anfragen).
+adminRouter.delete("/csrs/:id/management", requireAdmin, async (request: IRequest, env: Env) => {
+	await env.DB.prepare("DELETE FROM ca_resources WHERE csr_id = ?1").bind(Number(request.params.id)).run();
 	return Response.json({ ok: true });
 });

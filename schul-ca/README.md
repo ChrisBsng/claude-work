@@ -36,6 +36,28 @@ und Passworthinweis.
 * **Verifikation:** Beim Einreichen sind Kontaktperson und Kontaktweg (E-Mail, Teams oder Telefon, mit Kontaktangabe) Pflicht und werden serverseitig validiert (E-Mail-/Telefonformat). Die Administration sieht sie in der CSR-Liste und im Detail; für Schüler sind sie nicht abrufbar. Ein Hinweis zur Verifikation steht auf der Schülerseite.
 * CSRs werden abgelehnt bei ungültiger Signatur, fehlendem CN, RSA < 2048 Bit oder nicht unterstützter Kurve (steht auch öffentlich auf der Startseite).
 
+## Zwischen-CA verwalten (Klassen-Seite)
+
+Unter dem Abruf-Code eines ausgestellten Zwischenzertifikats gibt es das Häkchen „Ich möchte die
+Zwischenzertifizierungsstelle hier verwalten“. Es legt die Ressource `/ca/<Token>` an (128 Bit
+Zufall, ohne Login nutzbar), die der Inhaber an die Klasse weitergibt.
+
+* **Klassen-Seite (öffentlich, per URL):** Zwischenzertifikat herunterladen (PEM/DER/Kette), Tabelle
+  aller Anfragen und ausgestellten Zertifikate (Download PEM/Kette/Vollkette/DER), neue Anfrage per
+  eigenem CSR oder **Quick-Zertifikat** (CN, OU, SAN, E → Schlüssel und CSR werden serverseitig
+  erzeugt; der Private Key steht nur in der Antwort, wird nicht gespeichert und ist nur einmal
+  herunterladbar). Einreichen erfordert Captcha, Rate-Limit und ist je Zwischen-CA auf 300 Anfragen begrenzt.
+* **Inhaber-Bereich (Abruf-Code):** Anfragen prüfen, Subject/SAN/Laufzeit anpassen, freigeben
+  (= ausstellen) oder mit Grund ablehnen. Den Schlüssel der Zwischen-CA kann der Inhaber
+  **dauerhaft hinterlegen** (AES-256-GCM, eigener abgeleiteter Schlüssel `ca-key`) oder bei jeder
+  Freigabe **neu hochladen** (wird nur im Request verwendet). Ein hinterlegter Schlüssel ist für die
+  Betreiber technisch entschlüsselbar – die Oberfläche weist darauf hin.
+* **Endzertifikate:** CA:FALSE, KeyUsage digitalSignature (+ keyEncipherment bei RSA), EKU
+  serverAuth + clientAuth, SAN, SKI/AKI. SANs außerhalb der Name Constraints der Zwischen-CA werden
+  beim Ausstellen abgelehnt. Laufzeit max. 825 Tage und nie länger als die der Zwischen-CA.
+* Die Administration sieht die Verwaltung im CSR-Detail und kann sie deaktivieren (löscht
+  Klassen-URL, Anfragen und gespeicherten Schlüssel).
+
 ## Einrichtung
 
 ```bash
