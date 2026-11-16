@@ -2,7 +2,7 @@ import { call, download, esc, formatDay, formatDate } from "/api.js";
 
 const TOKEN_KEY = "schulCa.studentToken";
 const STATUS_LABELS = {
-	pending: "Wartet auf Freigabe",
+	pending: "Wartet auf Verifikation und Freigabe",
 	approved: "Freigegeben – Zertifikat wird erzeugt",
 	rejected: "Abgelehnt",
 	issued: "Zertifikat ausgestellt",
@@ -63,6 +63,7 @@ function requirementsHtml() {
 				<li><strong>Common Name:</strong> Der CSR muss einen <code>CN</code> enthalten, der die Klasse eindeutig bezeichnet (z. B. <code>FI-25a</code>).</li>
 				<li><strong>Private Key:</strong> bleibt bei euch – es wird nur der CSR hochgeladen, <strong>niemals</strong> die <code>.key</code>-Datei.</li>
 				<li><strong>Inhalt des Zertifikats:</strong> Der öffentliche Schlüssel kommt aus dem CSR. Organisation, Land usw. sowie alle Erweiterungen (CA-Zertifikat, Pfadlänge, Namensbeschränkungen, Laufzeit) legt die Schule per Vorlage fest; im CSR angeforderte Erweiterungen werden ignoriert.</li>
+				<li><strong>Kontaktangaben (Pflicht):</strong> Beim Einreichen sind <strong>Kontaktperson</strong> und ein <strong>Kontaktweg</strong> (E-Mail, Teams oder Telefon) anzugeben. Darüber meldet sich die Administration zur Verifikation.</li>
 				<li><strong>Freigabe:</strong> Jeder CSR wird von der Administration geprüft und kann mit Begründung abgelehnt werden.</li>
 			</ul>
 		</section>`;
@@ -180,6 +181,26 @@ function renderPortal(root, box, roots) {
 				<label>Klasse / Bezeichnung
 					<input type="text" name="label" required maxlength="80" placeholder="z. B. FI-25a" />
 				</label>
+				<fieldset class="contact">
+					<legend>Kontakt für die Verifikation (Pflicht)</legend>
+					<p class="notice">ℹ️ Bevor ein Zwischenzertifikat ausgestellt wird, <strong>prüft die Administration die Anfrage</strong> und nimmt dazu über den angegebenen Kontaktweg Kontakt mit der Kontaktperson auf. Bitte nur Angaben machen, unter denen die Person in der Schulzeit erreichbar ist. Ohne erfolgreiche Verifikation wird kein Zertifikat ausgestellt. Die Daten werden ausschließlich für diese Prüfung verwendet.</p>
+					<label>Kontaktperson (Vor- und Nachname)
+						<input type="text" name="contactPerson" required minlength="2" maxlength="80" autocomplete="name" placeholder="z. B. Max Mustermann" />
+					</label>
+					<div class="grid">
+						<label>Kontaktweg
+							<select name="contactMethod" required>
+								<option value="">– wählen –</option>
+								<option value="email">E-Mail</option>
+								<option value="teams">Microsoft Teams</option>
+								<option value="phone">Telefon</option>
+							</select>
+						</label>
+						<label><span id="contactDetailLabel">Kontaktangabe</span>
+							<input type="text" name="contactDetail" required minlength="3" maxlength="120" placeholder="zuerst Kontaktweg wählen" />
+						</label>
+					</div>
+				</fieldset>
 				<label>CSR (PEM) – einfügen oder Datei wählen
 					<textarea name="csr" rows="8" required placeholder="-----BEGIN CERTIFICATE REQUEST-----" spellcheck="false"></textarea>
 				</label>
@@ -199,6 +220,19 @@ function renderPortal(root, box, roots) {
 			<p class="error" id="lookupError" role="alert"></p>
 			<div id="lookupResult"></div>
 		</section>`;
+
+	const contactForm = box.querySelector("#upload");
+	const CONTACT_HINTS = {
+		email: ["E-Mail-Adresse", "vorname.nachname@schule.example", "email"],
+		teams: ["Teams-Name oder -Adresse", "z. B. Name in Teams oder Teams-Adresse", "text"],
+		phone: ["Telefonnummer", "z. B. 0123 456789", "tel"],
+	};
+	contactForm.contactMethod.addEventListener("change", () => {
+		const [label, placeholder, type] = CONTACT_HINTS[contactForm.contactMethod.value] ?? ["Kontaktangabe", "zuerst Kontaktweg wählen", "text"];
+		box.querySelector("#contactDetailLabel").textContent = label;
+		contactForm.contactDetail.placeholder = placeholder;
+		contactForm.contactDetail.type = type;
+	});
 
 	box.querySelector("#csrFile").addEventListener("change", async (event) => {
 		const file = event.target.files[0];
@@ -223,9 +257,17 @@ function renderPortal(root, box, roots) {
 			const result = await call("/api/student/csrs", {
 				method: "POST",
 				token,
-				body: { rootId: Number(form.rootId.value), label: form.label.value, csrPem: form.csr.value },
+				body: {
+					rootId: Number(form.rootId.value),
+					label: form.label.value,
+					csrPem: form.csr.value,
+					contactPerson: form.contactPerson.value,
+					contactMethod: form.contactMethod.value,
+					contactDetail: form.contactDetail.value,
+				},
 			});
 			form.reset();
+			form.contactMethod.dispatchEvent(new Event("change"));
 			const codeBox = box.querySelector("#codeBox");
 			codeBox.hidden = false;
 			codeBox.innerHTML = `
@@ -233,6 +275,7 @@ function renderPortal(root, box, roots) {
 					<p><strong>CSR eingereicht.</strong> Dein Abruf-Code (wird nur jetzt einmalig angezeigt – bitte notieren!):</p>
 					<div class="code mono">${esc(result.code)}</div>
 					<p class="muted small">${esc(result.subject)} · ${esc(result.keyInfo)}</p>
+					<p class="notice">Die Administration verifiziert deine Anfrage nun über den angegebenen Kontaktweg. Danach wird das Zertifikat ausgestellt.</p>
 					<button class="secondary" id="copyCode">Code kopieren</button>
 				</div>`;
 			codeBox.querySelector("#copyCode").addEventListener("click", async (e) => {

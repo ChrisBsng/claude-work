@@ -105,15 +105,23 @@ step("Root-Download PEM/DER");
 const alg = { name: "ECDSA", namedCurve: "P-256", hash: "SHA-256" };
 const keys = (await crypto.subtle.generateKey(alg, true, ["sign", "verify"])) as CryptoKeyPair;
 const csr = await x509.Pkcs10CertificateRequestGenerator.create({ name: "CN=FI-25a <script>", keys, signingAlgorithm: alg });
-r = await req("/api/student/csrs", { token: student, body: { rootId, label: "FI-25a", csrPem: "kein csr" } });
+r = await req("/api/student/csrs", { token: student, body: { rootId, label: "FI-25a", csrPem: "kein csr", contactPerson: "Max Mustermann", contactMethod: "email", contactDetail: "max@schule.example" } });
 assert.equal(r.status, 422);
 const noCn = await x509.Pkcs10CertificateRequestGenerator.create({ name: "O=Nur Org", keys, signingAlgorithm: alg });
-r = await req("/api/student/csrs", { token: student, body: { rootId, label: "x", csrPem: noCn.toString("pem") } });
+r = await req("/api/student/csrs", { token: student, body: { rootId, label: "x", csrPem: noCn.toString("pem"), contactPerson: "Max Mustermann", contactMethod: "email", contactDetail: "max@schule.example" } });
 assert.equal(r.status, 422);
 assert.match(r.data.error, /Common Name/);
-r = await req("/api/student/csrs", { token: student, body: { rootId: 999, label: "FI-25a", csrPem: csr.toString("pem") } });
+r = await req("/api/student/csrs", { token: student, body: { rootId: 999, label: "FI-25a", csrPem: csr.toString("pem"), contactPerson: "Max Mustermann", contactMethod: "email", contactDetail: "max@schule.example" } });
 assert.equal(r.status, 400);
-r = await req("/api/student/csrs", { token: student, body: { rootId, label: "FI-25a", csrPem: csr.toString("pem") } });
+const validCsr = csr.toString("pem");
+const bad = (extra: Record<string, unknown>) => req("/api/student/csrs", { token: student, body: { rootId, label: "FI-25a", csrPem: validCsr, contactPerson: "Max Mustermann", contactMethod: "email", contactDetail: "max@schule.example", ...extra } });
+for (const extra of [{ contactPerson: "" }, { contactPerson: "M" }, { contactMethod: "" }, { contactMethod: "fax" }, { contactDetail: "" }, { contactDetail: "keine-mail" }, { contactMethod: "phone", contactDetail: "abc" }]) {
+	r = await bad(extra);
+	assert.equal(r.status, 400, JSON.stringify(extra) + " muss abgelehnt werden");
+}
+r = await req("/api/student/csrs", { token: student, body: { rootId, label: "FI-25a", csrPem: validCsr } });
+assert.equal(r.status, 400, "ohne Kontaktangaben kein Upload");
+r = await req("/api/student/csrs", { token: student, body: { rootId, label: "FI-25a", csrPem: validCsr, contactPerson: "Max Mustermann", contactMethod: "email", contactDetail: "max@schule.example" } });
 assert.equal(r.status, 201, JSON.stringify(r.data));
 const code = r.data.code as string;
 assert.match(code, /^[A-Z2-9]{4}(-[A-Z2-9]{4}){3}$/);
@@ -131,6 +139,8 @@ assert.equal(r.data.csrs.length, 1);
 const csrId = r.data.csrs[0].id;
 r = await req(`/api/admin/csrs/${csrId}`, { token: admin });
 assert.equal(r.data.csr.csrFields.CN, "FI-25a <script>");
+assert.deepEqual([r.data.csr.contactPerson, r.data.csr.contactMethod, r.data.csr.contactDetail], ["Max Mustermann", "email", "max@schule.example"]);
+assert.ok(!JSON.stringify((await req("/api/student/csrs/lookup", { token: student, body: { code } })).data).includes("max@schule"), "Kontaktdaten nicht für Schüler abrufbar");
 assert.equal((await req(`/api/admin/csrs/${csrId}/issue`, { method: "POST", token: admin, body: {} })).status, 409, "ohne Freigabe kein Ausstellen");
 r = await req(`/api/admin/csrs/${csrId}/approve`, {
 	token: admin,
@@ -167,7 +177,7 @@ step("Zertifikatskette vom Schüler abgerufen, OpenSSL-Verifikation OK");
 // 11. Ablehnen-Flow, Löschschutz
 const keys2 = (await crypto.subtle.generateKey(alg, true, ["sign", "verify"])) as CryptoKeyPair;
 const csr2 = await x509.Pkcs10CertificateRequestGenerator.create({ name: "CN=FI-25b", keys: keys2, signingAlgorithm: alg });
-r = await req("/api/student/csrs", { token: student, body: { rootId, label: "FI-25b", csrPem: csr2.toString("pem") } });
+r = await req("/api/student/csrs", { token: student, body: { rootId, label: "FI-25b", csrPem: csr2.toString("pem"), contactPerson: "Erika Beispiel", contactMethod: "phone", contactDetail: "+49 123 456789" } });
 const code2 = r.data.code;
 const id2 = (await req("/api/admin/csrs?status=pending", { token: admin })).data.csrs[0].id;
 assert.equal((await req(`/api/admin/csrs/${id2}/reject`, { token: admin, body: { reason: "Bitte Klassenbezeichnung im CN" } })).status, 200);

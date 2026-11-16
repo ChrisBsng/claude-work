@@ -320,6 +320,9 @@ interface CsrRow {
 	issued_at: string | null;
 	root_name: string;
 	template_name: string | null;
+	contact_person: string;
+	contact_method: string;
+	contact_detail: string;
 }
 
 const CSR_SELECT = `SELECT c.*, r.name AS root_name, t.name AS template_name
@@ -330,6 +333,9 @@ const serializeCsr = (c: CsrRow, withPem = false) => ({
 	rootCaId: c.root_ca_id,
 	rootName: c.root_name,
 	label: c.label,
+	contactPerson: c.contact_person,
+	contactMethod: c.contact_method,
+	contactDetail: c.contact_detail,
 	subject: c.csr_subject,
 	keyInfo: c.key_info,
 	status: c.status,

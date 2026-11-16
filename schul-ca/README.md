@@ -33,6 +33,7 @@ und Passworthinweis.
   ausschließlich aus dem Template (BasicConstraints CA:TRUE kritisch + Pfadlänge, KeyUsage
   keyCertSign/cRLSign, SKI/AKI, optional Name Constraints, CRL-DP, AIA). Im CSR angeforderte
   Extensions werden ignoriert. Die Laufzeit wird auf die Gültigkeit des Stammzertifikats gekürzt.
+* **Verifikation:** Beim Einreichen sind Kontaktperson und Kontaktweg (E-Mail, Teams oder Telefon, mit Kontaktangabe) Pflicht und werden serverseitig validiert (E-Mail-/Telefonformat). Die Administration sieht sie in der CSR-Liste und im Detail; für Schüler sind sie nicht abrufbar. Ein Hinweis zur Verifikation steht auf der Schülerseite.
 * CSRs werden abgelehnt bei ungültiger Signatur, fehlendem CN, RSA < 2048 Bit oder nicht unterstützter Kurve (steht auch öffentlich auf der Startseite).
 
 ## Einrichtung

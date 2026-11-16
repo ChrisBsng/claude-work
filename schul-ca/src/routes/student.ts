@@ -12,6 +12,21 @@ export const studentRouter = Router({ base: "/api/student" });
 const MAX_CSR_BYTES = 16 * 1024;
 const MAX_LABEL_LENGTH = 80;
 
+const CONTACT_METHODS = ["email", "teams", "phone"] as const;
+type ContactMethod = (typeof CONTACT_METHODS)[number];
+
+// Kontaktangaben für die Verifikation durch die Administration.
+function validateContact(person: unknown, method: unknown, detail: unknown): { error: string } | { person: string; method: ContactMethod; detail: string } {
+	const p = typeof person === "string" ? person.trim() : "";
+	const d = typeof detail === "string" ? detail.trim() : "";
+	if (p.length < 2 || p.length > 80) return { error: "Bitte die Kontaktperson angeben (Vor- und Nachname, 2–80 Zeichen)." };
+	if (!CONTACT_METHODS.includes(method as ContactMethod)) return { error: "Bitte einen Kontaktweg wählen (E-Mail, Teams oder Telefon)." };
+	if (d.length < 3 || d.length > 120) return { error: "Bitte die Kontaktangabe zum gewählten Kontaktweg eintragen." };
+	if (method === "email" && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(d)) return { error: "Bitte eine gültige E-Mail-Adresse angeben." };
+	if (method === "phone" && !/^\+?[0-9 ()\/.-]{6,30}$/.test(d)) return { error: "Bitte eine gültige Telefonnummer angeben." };
+	return { person: p, method: method as ContactMethod, detail: d };
+}
+
 // Abruf-Code: 16 Zeichen aus eindeutigem Alphabet (80 Bit), z. B. K7QM-4TXD-9WPB-2HNC
 const CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 function generateCode(): string {
@@ -92,10 +107,12 @@ studentRouter.post("/csrs", requireStudent, async (request: IRequest, env: Env) 
 	if (!(await rateLimitOk(env, `csr-upload:${clientIp(request)}`, 20, 3600))) {
 		return badRequest("Zu viele Uploads. Bitte später erneut versuchen.", 429);
 	}
-	const body = await readJson<{ rootId?: number; label?: string; csrPem?: string }>(request);
+	const body = await readJson<{ rootId?: number; label?: string; csrPem?: string; contactPerson?: string; contactMethod?: string; contactDetail?: string }>(request);
 	const label = body?.label?.trim();
 	const csrPem = body?.csrPem?.trim();
 	if (!label || label.length > MAX_LABEL_LENGTH) return badRequest(`Bitte die Klasse/Bezeichnung angeben (max. ${MAX_LABEL_LENGTH} Zeichen).`);
+	const contact = validateContact(body?.contactPerson, body?.contactMethod, body?.contactDetail);
+	if ("error" in contact) return badRequest(contact.error);
 	if (!csrPem) return badRequest("Bitte einen CSR einfügen oder hochladen.");
 	if (csrPem.length > MAX_CSR_BYTES) return badRequest("Der CSR ist zu groß.");
 
@@ -114,9 +131,9 @@ studentRouter.post("/csrs", requireStudent, async (request: IRequest, env: Env) 
 
 	const code = generateCode();
 	await env.DB.prepare(
-		"INSERT INTO csrs (root_ca_id, label, csr_pem, csr_subject, key_info, code_hash) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+		"INSERT INTO csrs (root_ca_id, label, csr_pem, csr_subject, key_info, code_hash, contact_person, contact_method, contact_detail) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
 	)
-		.bind(root.id, label, csrPem, info.subject, info.keyInfo, await hashCode(code.replace(/-/g, "")))
+		.bind(root.id, label, csrPem, info.subject, info.keyInfo, await hashCode(code.replace(/-/g, "")), contact.person, contact.method, contact.detail)
 		.run();
 	return Response.json({ code, subject: info.subject, keyInfo: info.keyInfo }, { status: 201 });
 });
