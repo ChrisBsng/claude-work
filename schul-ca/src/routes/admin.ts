@@ -2,6 +2,8 @@ import { Router, type IRequest } from "itty-router";
 import { checkPassword, getSetting, issueToken, requireAdmin, setSetting, storePassword } from "../auth";
 import { decryptSecret, encryptSecret } from "../crypto";
 import type { Env } from "../env";
+import { generateCode, hashCode, normalizeCode } from "../codes";
+import { validateContact } from "../contact";
 import { badRequest, fileResponse, MIME, readJson, safeName } from "../http";
 import { clientIp, rateLimitOk } from "../rateLimit";
 import {
@@ -483,9 +485,45 @@ adminRouter.get("/csrs/:id/certificate", requireAdmin, async (request: IRequest,
 	return fileResponse(csr.cert_pem + "\n", `${base}.pem`, MIME.pem);
 });
 
-adminRouter.delete("/csrs/:id", requireAdmin, async (request: IRequest, env: Env) => {
-	await env.DB.prepare("DELETE FROM csrs WHERE id = ?1").bind(Number(request.params.id)).run();
+// Kontaktdaten (Verifikation) eines Antrags bearbeiten.
+adminRouter.patch("/csrs/:id/contact", requireAdmin, async (request: IRequest, env: Env) => {
+	const body = await readJson<{ contactPerson?: string; contactMethod?: string; contactDetail?: string }>(request);
+	const contact = validateContact(body?.contactPerson, body?.contactMethod, body?.contactDetail);
+	if ("error" in contact) return badRequest(contact.error);
+	const result = await env.DB.prepare("UPDATE csrs SET contact_person = ?1, contact_method = ?2, contact_detail = ?3 WHERE id = ?4")
+		.bind(contact.person, contact.method, contact.detail, Number(request.params.id))
+		.run();
+	if (!result.meta.changes) return badRequest("Nicht gefunden", 404);
 	return Response.json({ ok: true });
+});
+
+// Abruf-Code zurücksetzen: neuer Code (nur jetzt im Klartext), der alte ist ungültig; laufende
+// Abruf-Sitzungen enden sofort, weil sie an den bisherigen Code gebunden sind.
+adminRouter.post("/csrs/:id/reset-code", requireAdmin, async (request: IRequest, env: Env) => {
+	const id = Number(request.params.id);
+	const code = generateCode();
+	const result = await env.DB.prepare("UPDATE csrs SET code_hash = ?1 WHERE id = ?2").bind(await hashCode(normalizeCode(code)!), id).run();
+	if (!result.meta.changes) return badRequest("Nicht gefunden", 404);
+	return Response.json({ code });
+});
+
+// Zwischenzertifikat endgültig löschen – mit allen Daten dieser Klasse: CSR, Klassen-Seite, gespeicherter
+// Schlüssel und alle Anfragen/Zertifikate der Mitschüler. (Das ausgestellte Zertifikat selbst bleibt
+// kryptografisch gültig; es gibt keinen Widerruf.)
+adminRouter.delete("/csrs/:id", requireAdmin, async (request: IRequest, env: Env) => {
+	const id = Number(request.params.id);
+	const counts = await env.DB.prepare(
+		"SELECT (SELECT COUNT(*) FROM leaf_requests lr JOIN ca_resources m ON m.id = lr.ca_id WHERE m.csr_id = ?1) AS leaves, (SELECT COUNT(*) FROM ca_resources WHERE csr_id = ?1) AS managed",
+	)
+		.bind(id)
+		.first<{ leaves: number; managed: number }>();
+	// Explizit und atomar (statt sich auf ON DELETE CASCADE zu verlassen).
+	await env.DB.batch([
+		env.DB.prepare("DELETE FROM leaf_requests WHERE ca_id IN (SELECT id FROM ca_resources WHERE csr_id = ?1)").bind(id),
+		env.DB.prepare("DELETE FROM ca_resources WHERE csr_id = ?1").bind(id),
+		env.DB.prepare("DELETE FROM csrs WHERE id = ?1").bind(id),
+	]);
+	return Response.json({ ok: true, deletedLeafRequests: counts?.leaves ?? 0, hadManagement: Boolean(counts?.managed) });
 });
 
 // Verwaltung durch den Inhaber deaktivieren (löscht Klassen-URL, gespeicherten Schlüssel und Anfragen).

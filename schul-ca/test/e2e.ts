@@ -126,7 +126,7 @@ r = await req("/api/student/csrs", { token: student, body: { rootId, label: "FI-
 assert.equal(r.status, 400, "ohne Kontaktangaben kein Upload");
 r = await req("/api/student/csrs", { token: student, body: { rootId, label: "FI-25a", csrPem: validCsr, contactPerson: "Max Mustermann", contactMethod: "email", contactDetail: "max@schule.example" } });
 assert.equal(r.status, 201, JSON.stringify(r.data));
-const code = r.data.code as string;
+let code = r.data.code as string;
 assert.match(code, /^[A-Z2-9]{4}(-[A-Z2-9]{4}){3}$/);
 step(`CSR hochgeladen, Code ${code}`);
 
@@ -214,13 +214,15 @@ const quickBody = { requester: "Anna", cn: "web.schule.example", ou: "FI-25a", s
 assert.equal((await req(`/api/ca/${caToken}/quick`, { body: quickBody })).status, 400, "ohne Captcha abgelehnt");
 r = await req(`/api/ca/${caToken}/quick`, { body: { ...quickBody, san: "", ...(await captcha("QQQQ2")) } });
 assert.equal(r.status, 400, "SAN Pflicht");
-for (const [field, value] of [["ou", ""], ["email", ""], ["email", "keine-mail"]] as const) {
-	r = await req(`/api/ca/${caToken}/quick`, { body: { ...quickBody, [field]: value, ...(await captcha("Q" + Math.random().toString(36).slice(2, 6).toUpperCase())) } });
-	assert.equal(r.status, 400, `Quick: ${field}="${value}" muss abgelehnt werden`);
-	assert.match(r.data.error, /OU|E-Mail/);
+for (const email of ["", "keine-mail"]) {
+	r = await req(`/api/ca/${caToken}/quick`, { body: { ...quickBody, email, ...(await captcha("Q" + Math.random().toString(36).slice(2, 6).toUpperCase())) } });
+	assert.equal(r.status, 400, `Quick: E-Mail="${email}" muss abgelehnt werden`);
+	assert.match(r.data.error, /E-Mail/);
 }
 r = await req(`/api/ca/${caToken}/requests`, { body: { csrPem: csr.toString("pem"), ...(await captcha("QQQQ7")) } });
-assert.equal(r.status, 400, "CSR-Upload ohne OU/E-Mail abgelehnt");
+assert.equal(r.status, 400, "CSR-Upload ohne E-Mail abgelehnt");
+// Ein mitgeschicktes OU wird ignoriert (OU kommt fest aus dem Zwischenzertifikat)
+assert.equal((await req(`/api/ca/${caToken}`)).data.fixedOu, "Klassen");
 r = await req(`/api/ca/${caToken}/quick`, { body: { ...quickBody, ...(await captcha("QQQQ3")) } });
 assert.equal(r.status, 201, JSON.stringify(r.data));
 assert.match(r.data.privateKeyPem, /BEGIN PRIVATE KEY/);
@@ -267,9 +269,9 @@ assert.equal(r.data.requests.find((x: any) => x.id === quickId).email, "anna@sch
 // Ausstellen ohne hinterlegten Key: Key muss mitkommen
 const caKeyPem = x509.PemConverter.encode((await crypto.subtle.exportKey("pkcs8", keys.privateKey)) as ArrayBuffer, "PRIVATE KEY");
 const approve = { cn: "web.schule.example", ou: "FI-25a", email: "anna@schule.example", san: "web.schule.example, 192.0.2.7", validityDays: 90 };
-assert.deepEqual(r.data.defaults, { C: "DE", ST: "", L: "", O: "Schule Muster" }, "C/ST/L/O aus dem Zwischenzertifikat");
+assert.deepEqual(r.data.defaults, { C: "DE", ST: "", L: "", O: "Schule Muster", OU: "Klassen" }, "C/ST/L/O/OU aus dem Zwischenzertifikat");
+assert.equal(r.data.requests.find((x: any) => x.id === quickId).ou, "Klassen", "OU der Anfrage = fester Text aus dem Zwischenzertifikat (mitgeschickte OU ignoriert)");
 assert.ok(r.data.maxValidityDays >= 179 && r.data.maxValidityDays <= 180, "Maximum = Restlaufzeit der Zwischen-CA (180 Tage)");
-assert.equal((await ownerReq(`/requests/${quickId}/approve`, "POST", { ...approve, ou: "", keyPem: caKeyPem })).status, 400, "OU Pflicht bei Freigabe");
 assert.equal((await ownerReq(`/requests/${quickId}/approve`, "POST", { ...approve, email: "", keyPem: caKeyPem })).status, 400, "E-Mail Pflicht bei Freigabe");
 assert.equal((await ownerReq(`/requests/${quickId}/approve`, "POST", { ...approve, validityDays: 400, keyPem: caKeyPem })).status, 400, "Laufzeit über Restlaufzeit der Zwischen-CA");
 assert.equal((await ownerReq(`/requests/${quickId}/approve`, "POST", approve)).status, 400, "ohne Key");
@@ -285,7 +287,7 @@ assert.equal((await ownerReq("/key", "PUT", { keyPem: caKeyPem })).status, 200);
 assert.equal((await req(`/api/ca/${caToken}`)).data.keyStored, true);
 r = await ownerReq(`/requests/${evilId}/approve`, "POST", { cn: "evil.example", san: "evil.example", validityDays: 30, ou: "FI-25a", email: "anna@schule.example" });
 assert.equal(r.status, 422, "Constraint-Verstoß auch mit hinterlegtem Key");
-r = await ownerReq(`/requests/${evilId}/approve`, "POST", { cn: "ok.klasse.example", san: "ok.klasse.example", validityDays: 30, ou: "FI-25a", email: "bob@schule.example", subject: { O: "Andere Organisation", L: "Köln" } });
+r = await ownerReq(`/requests/${evilId}/approve`, "POST", { cn: "ok.klasse.example", san: "ok.klasse.example", validityDays: 30, email: "bob@schule.example", subject: { O: "Andere Organisation", L: "Köln" } });
 assert.equal(r.status, 200, JSON.stringify(r.data));
 assert.equal((await ownerReq(`/requests/${evilId}/approve`, "POST", { cn: "ok.klasse.example", san: "ok.klasse.example", ou: "FI-25a", email: "anna@schule.example" })).status, 409, "bereits ausgestellt");
 
@@ -308,6 +310,7 @@ try {
 	assert.match(sub, /organizationName\s*=\s*Andere Organisation/, "Inhaber hat O überschrieben");
 	assert.match(sub, /localityName\s*=\s*(Köln|K\\C3\\B6ln)/, "Inhaber hat L ergänzt (UTF-8)");
 	assert.match(sub, /countryName\s*=\s*DE/, "C bleibt aus dem Zwischenzertifikat");
+	assert.match(sub, /organizationalUnitName\s*=\s*Klassen/, "OU ohne Angabe = fester Text aus dem Zwischenzertifikat");
 } catch (e: any) {
 	if (e.code !== "ENOENT") throw e;
 }
@@ -346,10 +349,58 @@ assert.equal(r.data.leaves.length, 3);
 assert.deepEqual(r.data.leaves.map((l: any) => l.status).sort(), ["issued", "issued", "rejected"]);
 assert.ok(r.data.leaves.every((l: any) => l.ou && l.email), "OU und E-Mail zu jedem verwalteten Zertifikat");
 assert.equal((await req(`/api/admin/csrs/${csrId}/leaves`)).status, 401);
+
+// Admin: Kontakt bearbeiten
+const goodContact = { contactPerson: "Erika Neu", contactMethod: "teams", contactDetail: "erika.neu" };
+assert.equal((await req(`/api/admin/csrs/${csrId}/contact`, { method: "PATCH", body: goodContact })).status, 401);
+assert.equal((await req(`/api/admin/csrs/${csrId}/contact`, { method: "PATCH", token: admin, body: { ...goodContact, contactMethod: "email", contactDetail: "keine-mail" } })).status, 400);
+assert.equal((await req(`/api/admin/csrs/${csrId}/contact`, { method: "PATCH", token: admin, body: { ...goodContact, contactPerson: "" } })).status, 400);
+assert.equal((await req(`/api/admin/csrs/99999/contact`, { method: "PATCH", token: admin, body: goodContact })).status, 404);
+assert.equal((await req(`/api/admin/csrs/${csrId}/contact`, { method: "PATCH", token: admin, body: goodContact })).status, 200);
+r = await req(`/api/admin/csrs/${csrId}`, { token: admin });
+assert.deepEqual([r.data.csr.contactPerson, r.data.csr.contactMethod, r.data.csr.contactDetail], ["Erika Neu", "teams", "erika.neu"]);
+
+// Admin: Abruf-Code zurücksetzen – alter Code und laufende Abruf-Sitzungen werden ungültig
+assert.equal((await req(`/api/admin/csrs/${csrId}/reset-code`, { method: "POST" })).status, 401);
+assert.equal((await req(`/api/admin/csrs/99999/reset-code`, { method: "POST", token: admin })).status, 404);
+assert.equal((await ownerReq("", "GET")).status, 200, "Inhaber-Sitzung vor dem Zurücksetzen gültig");
+r = await req(`/api/admin/csrs/${csrId}/reset-code`, { method: "POST", token: admin });
+assert.equal(r.status, 200);
+const newCode = r.data.code as string;
+assert.match(newCode, /^[A-Z2-9]{4}(-[A-Z2-9]{4}){3}$/);
+assert.notEqual(newCode, code);
+assert.equal((await lookup(code)).status, 404, "alter Abruf-Code ungültig");
+assert.equal((await ownerReq("", "GET")).status, 401, "alte Inhaber-Sitzung ungültig");
+assert.equal((await req("/api/student/csrs/certificate", { token: pk, body: { format: "pem" } })).status, 401, "alte Abruf-Sitzung ungültig");
+assert.equal((await req(`/api/ca/${caToken}/owner/login`, { body: { code, ...(await captcha("OWNER")) } })).status, 401, "alter Code für Inhaber-Login ungültig");
+r = await lookup(newCode);
+assert.equal(r.status, 200, "neuer Code funktioniert");
+assert.equal(r.data.management.token, caToken, "Klassen-URL bleibt unverändert");
+assert.equal((await req(`/api/ca/${caToken}/owner/login`, { body: { code: newCode, ...(await captcha("OWNER")) } })).status, 200);
+code = newCode;
 assert.equal((await req(`/api/admin/csrs/${csrId}/management`, { method: "DELETE", token: admin })).status, 200);
 assert.equal((await req(`/api/ca/${caToken}`)).status, 404, "Klassen-URL nach Deaktivierung weg");
 assert.equal((await lookup(code)).data.management.enabled, false);
-step("Key löschen, Admin deaktiviert Verwaltung");
+step("Key löschen, Admin: Kontakt bearbeiten, Code zurücksetzen, Verwaltung deaktivieren");
+
+// Zwischenzertifikat löschen: mit Klassen-Seite, Anfragen und gespeichertem Schlüssel
+r = await lookup(code);
+r = await req("/api/student/csrs/manage", { token: r.data.pickupToken, body: { enable: true } });
+const caToken2 = r.data.token as string;
+assert.notEqual(caToken2, caToken, "neue Klassen-URL nach erneutem Aktivieren");
+r = await req(`/api/ca/${caToken2}/quick`, { body: { cn: "weg.schule.example", san: "weg.schule.example", email: "x@schule.example", ...(await captcha("QQQQ9")) } });
+assert.equal(r.status, 201);
+assert.equal((await req(`/api/ca/${caToken2}`)).data.certificates.length, 1);
+assert.equal((await req(`/api/admin/csrs/${csrId}`, { method: "DELETE" })).status, 401);
+r = await req(`/api/admin/csrs/${csrId}`, { method: "DELETE", token: admin });
+assert.equal(r.status, 200);
+assert.deepEqual([r.data.deletedLeafRequests, r.data.hadManagement], [1, true]);
+assert.equal((await req(`/api/ca/${caToken2}`)).status, 404, "Klassen-Seite weg");
+assert.equal((await lookup(code)).status, 404, "Abruf-Code weg");
+assert.equal((await req(`/api/admin/csrs/${csrId}`, { token: admin })).status, 404, "CSR weg");
+assert.equal((await req(`/api/admin/csrs/${csrId}/leaves`, { token: admin })).data.leaves.length, 0, "Klassen-Anfragen weg");
+assert.equal((await req(`/api/admin/csrs/${csrId}`, { method: "DELETE", token: admin })).status, 200, "Löschen ist idempotent");
+step("Zwischenzertifikat samt Klassen-Daten gelöscht");
 
 // 11. Ablehnen-Flow, Löschschutz
 const keys2 = (await crypto.subtle.generateKey(alg, true, ["sign", "verify"])) as CryptoKeyPair;

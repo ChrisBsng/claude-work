@@ -1,4 +1,4 @@
-import { call, download, esc, formatDate, formatDay } from "/api.js";
+import { call, download, esc, formatDate, formatDay, siteUrl } from "/api.js";
 import { mountCaptcha } from "/captcha.js";
 import { STATUS_LABELS, subpageHead } from "/views/student-shared.js";
 
@@ -91,7 +91,7 @@ function renderManage(out, r, pickupToken, expired) {
 			info.innerHTML = "";
 			return;
 		}
-		const url = `${location.origin}/ca/${t}`;
+		const url = siteUrl(`/ca/${t}`);
 		// Abruf-Sitzung für den Inhaber-Bereich weitergeben (nur in diesem Tab, nur im Arbeitsspeicher der Sitzung)
 		sessionStorage.setItem(`schulCa.owner.${t}`, pickupToken);
 		info.innerHTML = `

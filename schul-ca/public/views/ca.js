@@ -56,14 +56,12 @@ export async function renderCa(root, token) {
 				<p class="muted small">Der Schlüssel und der CSR werden hier für dich erzeugt (EC P-256). Du kannst den <strong>privaten Schlüssel nur ein einziges Mal</strong> herunterladen – er wird nicht gespeichert.</p>
 				<div class="grid">
 					<label>Common Name (CN) *<input name="cn" required maxlength="64" placeholder="web.klasse.example" /></label>
-					<label>Abteilung / Klasse (OU) *<input name="ou" required maxlength="64" placeholder="z. B. FI-25a" /></label>
+					<label>E-Mail (E) *<input name="email" type="email" required maxlength="120" placeholder="vorname.nachname@schule.example" /></label>
 				</div>
 				<label>SAN – Hostnamen / IPs / E-Mail (kommagetrennt) *<input name="san" required placeholder="web.klasse.example, 192.0.2.10" /></label>
-				<div class="grid">
-					<label>E-Mail (E) *<input name="email" type="email" required maxlength="120" placeholder="vorname.nachname@schule.example" /></label>
-					<label>Dein Name (für den Inhaber)<input name="requester" maxlength="80" /></label>
-				</div>
-				<p class="muted small">OU und E-Mail sind Pflicht: Der Inhaber der Zwischenzertifizierungsstelle muss dich als Antragsteller identifizieren können. Organisation, Land und Ort werden automatisch aus dem Zwischenzertifikat übernommen.</p>
+				<label>Dein Name (für den Inhaber)<input name="requester" maxlength="80" /></label>
+				<p class="fixed-ou">Abteilung (OU): <strong>${esc(data.fixedOu)}</strong> <span class="muted small">– fest aus dem Zwischenzertifikat übernommen, wird nicht abgefragt.</span></p>
+				<p class="muted small">Die E-Mail-Adresse ist Pflicht: Der Inhaber der Zwischenzertifizierungsstelle muss dich als Antragsteller identifizieren können. Organisation, Land und Ort werden automatisch aus dem Zwischenzertifikat übernommen.</p>
 				<div data-captcha></div>
 				<p class="error" data-error role="alert"></p>
 				<button type="submit">Quick-Zertifikat anfordern</button>
@@ -75,11 +73,11 @@ export async function renderCa(root, token) {
 				</label>
 				<input type="file" id="csrFile" accept=".csr,.pem,.txt,.req" />
 				<div class="grid">
-					<label>Abteilung / Klasse (OU) *<input name="ou" required maxlength="64" placeholder="z. B. FI-25a" /></label>
 					<label>E-Mail (E) *<input name="email" type="email" required maxlength="120" placeholder="vorname.nachname@schule.example" /></label>
+					<label>Dein Name (für den Inhaber)<input name="requester" maxlength="80" /></label>
 				</div>
-				<label>Dein Name (für den Inhaber)<input name="requester" maxlength="80" /></label>
-				<p class="muted small">OU und E-Mail sind Pflicht (Identifizierung des Antragstellers). Organisation, Land und Ort werden aus dem Zwischenzertifikat übernommen. SAN-Einträge werden aus dem CSR übernommen und vom Inhaber geprüft. Nur den CSR hochladen, <strong>niemals den Private Key</strong>.</p>
+				<p class="fixed-ou">Abteilung (OU): <strong>${esc(data.fixedOu)}</strong> <span class="muted small">– fest aus dem Zwischenzertifikat übernommen, wird nicht abgefragt.</span></p>
+				<p class="muted small">Die E-Mail-Adresse ist Pflicht (Identifizierung des Antragstellers). Organisation, Land und Ort werden aus dem Zwischenzertifikat übernommen. Eine im CSR enthaltene OU wird ignoriert. SAN-Einträge werden aus dem CSR übernommen und vom Inhaber geprüft. Nur den CSR hochladen, <strong>niemals den Private Key</strong>.</p>
 				<div data-captcha></div>
 				<p class="error" data-error role="alert"></p>
 				<button type="submit">CSR einreichen</button>
@@ -124,7 +122,7 @@ export async function renderCa(root, token) {
 		try {
 			const res = await call(`${base}/quick`, {
 				method: "POST",
-				body: { cn: quickForm.cn.value, ou: quickForm.ou.value, san: quickForm.san.value, email: quickForm.email.value, requester: quickForm.requester.value, ...captchas.quick.values() },
+				body: { cn: quickForm.cn.value, san: quickForm.san.value, email: quickForm.email.value, requester: quickForm.requester.value, ...captchas.quick.values() },
 			});
 			showQuickResult(root.querySelector("#quickResult"), res, quickForm.cn.value);
 			quickForm.reset();
@@ -142,7 +140,7 @@ export async function renderCa(root, token) {
 		const err = csrForm.querySelector("[data-error]");
 		err.textContent = "";
 		try {
-			await call(`${base}/requests`, { method: "POST", body: { csrPem: csrForm.csr.value, ou: csrForm.ou.value, email: csrForm.email.value, requester: csrForm.requester.value, ...captchas.csr.values() } });
+			await call(`${base}/requests`, { method: "POST", body: { csrPem: csrForm.csr.value, email: csrForm.email.value, requester: csrForm.requester.value, ...captchas.csr.values() } });
 			csrForm.reset();
 			err.innerHTML = `<span class="ok">CSR eingereicht. Der Inhaber prüft die Anfrage – danach erscheint das Zertifikat in der Tabelle.</span>`;
 			await refreshPublic();

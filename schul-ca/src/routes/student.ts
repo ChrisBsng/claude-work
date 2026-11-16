@@ -7,6 +7,7 @@ import { badRequest, fileResponse, MIME, readJson, safeName } from "../http";
 import { analyzeCsr, certPemToDer, PkiError } from "../pki";
 import { randomToken } from "../crypto";
 import { createPickupToken, pickupCsrId } from "../pickup";
+import { validateContact } from "../contact";
 import { clientIp, rateLimitOk } from "../rateLimit";
 
 export const studentRouter = Router({ base: "/api/student" });
@@ -14,20 +15,6 @@ export const studentRouter = Router({ base: "/api/student" });
 const MAX_CSR_BYTES = 16 * 1024;
 const MAX_LABEL_LENGTH = 80;
 
-const CONTACT_METHODS = ["email", "teams", "phone"] as const;
-type ContactMethod = (typeof CONTACT_METHODS)[number];
-
-// Kontaktangaben für die Verifikation durch die Administration.
-function validateContact(person: unknown, method: unknown, detail: unknown): { error: string } | { person: string; method: ContactMethod; detail: string } {
-	const p = typeof person === "string" ? person.trim() : "";
-	const d = typeof detail === "string" ? detail.trim() : "";
-	if (p.length < 2 || p.length > 80) return { error: "Bitte die Kontaktperson angeben (Vor- und Nachname, 2–80 Zeichen)." };
-	if (!CONTACT_METHODS.includes(method as ContactMethod)) return { error: "Bitte einen Kontaktweg wählen (E-Mail, Teams oder Telefon)." };
-	if (d.length < 3 || d.length > 120) return { error: "Bitte die Kontaktangabe zum gewählten Kontaktweg eintragen." };
-	if (method === "email" && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(d)) return { error: "Bitte eine gültige E-Mail-Adresse angeben." };
-	if (method === "phone" && !/^\+?[0-9 ()\/.-]{6,30}$/.test(d)) return { error: "Bitte eine gültige Telefonnummer angeben." };
-	return { person: p, method: method as ContactMethod, detail: d };
-}
 
 // Öffentlich: Stammzertifikate (nur das Zertifikat, nie der Key) und Passworthinweis.
 // Öffentlich: Passworthinweis + ob die Schüleroberfläche überhaupt freigeschaltet ist.
@@ -128,6 +115,7 @@ studentRouter.post("/csrs", requireStudent, async (request: IRequest, env: Env) 
 
 interface CsrLookupRow {
 	id: number;
+	code_hash: string;
 	label: string;
 	csr_subject: string;
 	key_info: string;
@@ -141,7 +129,7 @@ interface CsrLookupRow {
 	root_cert_pem: string;
 }
 
-const CSR_LOOKUP_SQL = `SELECT c.id, c.label, c.csr_subject, c.key_info, c.status, c.reject_reason, c.cert_pem, c.not_before, c.not_after, c.submitted_at,
+const CSR_LOOKUP_SQL = `SELECT c.id, c.code_hash, c.label, c.csr_subject, c.key_info, c.status, c.reject_reason, c.cert_pem, c.not_before, c.not_after, c.submitted_at,
 		        r.name AS root_name, r.cert_pem AS root_cert_pem
 		 FROM csrs c JOIN root_cas r ON r.id = c.root_ca_id`;
 
@@ -175,7 +163,7 @@ studentRouter.post("/csrs/lookup", async (request: IRequest, env: Env) => {
 		.bind(row.id)
 		.first<{ public_token: string; has_key: number }>();
 	return Response.json({
-		pickupToken: await createPickupToken(env, row.id),
+		pickupToken: await createPickupToken(env, row.id, row.code_hash),
 		management: row.status === "issued" ? { enabled: Boolean(managed), token: managed?.public_token ?? null, keyStored: Boolean(managed?.has_key) } : null,
 		label: row.label,
 		subject: row.csr_subject,

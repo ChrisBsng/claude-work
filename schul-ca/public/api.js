@@ -59,3 +59,10 @@ export function formatDay(iso) {
 	if (!iso) return "–";
 	return new Date(iso).toLocaleDateString("de-DE", { dateStyle: "medium" });
 }
+
+// Absolute Adresse zu einem Pfad der Seite – immer aus der Adresse abgeleitet, unter der der Browser
+// die Seite gerade aufgerufen hat. Es gibt bewusst keine fest eingetragene Domain (weder im Server noch
+// im Frontend): Der Server liefert nur Pfade wie "/ca/<Token>", der Browser macht daraus die Adresse.
+export function siteUrl(path) {
+	return new URL(path, window.location.origin).href;
+}

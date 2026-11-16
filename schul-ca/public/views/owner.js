@@ -126,11 +126,11 @@ export async function renderOwner(root, token) {
 				<h4>Antragsteller (Pflicht)</h4>
 				<div class="grid">
 					<label>Common Name (CN)<input name="cn" required maxlength="64" value="${esc(req.cn)}" /></label>
-					<label>Abteilung / Klasse (OU) *<input name="ou" required maxlength="64" value="${esc(req.ou)}" /></label>
 					<label>E-Mail (E) *<input name="email" type="email" required maxlength="120" value="${esc(req.email)}" /></label>
 				</div>
-				<h4>Organisation &amp; Standort (aus dem Zwischenzertifikat, anpassbar)</h4>
+				<h4>Abteilung, Organisation &amp; Standort (aus dem Zwischenzertifikat, anpassbar)</h4>
 				<div class="grid">
+					<label>Abteilung (OU)<input name="ou" maxlength="64" value="${esc(req.ou || state.defaults.OU)}" /></label>
 					<label>Organisation (O)<input name="O" maxlength="64" value="${esc(state.defaults.O)}" /></label>
 					<label>Land (C)<input name="C" maxlength="2" value="${esc(state.defaults.C)}" /></label>
 					<label>Bundesland (ST)<input name="ST" maxlength="64" value="${esc(state.defaults.ST)}" /></label>
