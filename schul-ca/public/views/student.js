@@ -29,12 +29,15 @@ export async function renderStudent(root) {
 	]);
 
 	root.innerHTML = `
-		<div class="topbar"><div><h1>Schul-CA</h1><p class="muted">Zwischenzertifikate für Klassen</p></div>
-			${loggedIn ? `<button class="secondary" id="logout">Abmelden</button>` : ""}</div>
+		<header class="page-head">
+			<span class="badge-pill">Zwischenzertifikate für Klassen</span>
+			<h1>Schul-<span>CA</span></h1>
+			<p>Stammzertifikat herunterladen, Zertifikatsanforderung (CSR) einreichen und das Zwischenzertifikat deiner Klasse abrufen.</p>
+			${loggedIn ? `<p><button class="secondary" id="logout">Abmelden</button></p>` : ""}
+		</header>
 		${requirementsHtml()}
 		${rootsHtml(roots)}
-		<div id="protected"></div>
-		<p class="footer"><a href="/admin">Administration</a></p>`;
+		<div id="protected"></div>`;
 
 	root.querySelector("#logout")?.addEventListener("click", () => {
 		clearToken();

@@ -35,15 +35,15 @@ export async function renderAdmin(root) {
 
 function renderLogin(root) {
 	root.innerHTML = `
-		<h1>Schul-CA · Administration</h1>
-		<div class="card narrow">
+		<header class="page-head"><span class="badge-pill">Administration</span><h1>Schul-<span>CA</span></h1></header>
+		<div class="card narrow" style="margin-inline:auto">
 			<form id="login">
 				<label>Admin-Passwort <input type="password" name="password" required autofocus /></label>
 				<p class="error" id="error" role="alert"></p>
 				<button type="submit">Anmelden</button>
 			</form>
 		</div>
-		<p class="footer"><a href="/">Zur Schüleransicht</a></p>`;
+		<p class="muted small" style="text-align:center"><a href="/">Zur Schüleransicht</a></p>`;
 	root.querySelector("#login").addEventListener("submit", async (event) => {
 		event.preventDefault();
 		try {
@@ -58,10 +58,11 @@ function renderLogin(root) {
 
 function renderShell(root) {
 	root.innerHTML = `
-		<div class="topbar">
-			<h1>Schul-CA · Administration</h1>
-			<div class="actions"><a href="/" class="button-link secondary">Schüleransicht</a><button class="secondary" id="logout">Abmelden</button></div>
-		</div>
+		<header class="page-head">
+			<span class="badge-pill">Administration</span>
+			<h1>Schul-<span>CA</span></h1>
+			<div class="actions" style="justify-content:center"><a href="/" class="button-link secondary">Schüleransicht</a><button class="secondary" id="logout">Abmelden</button></div>
+		</header>
 		<nav class="tabs">${TABS.map(([id, label]) => `<button data-tab="${id}" class="${id === activeTab ? "active" : ""}">${label}</button>`).join("")}</nav>
 		<div id="panel"></div>`;
 	root.querySelector("#logout").addEventListener("click", () => {
