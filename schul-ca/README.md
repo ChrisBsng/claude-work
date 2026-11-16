@@ -83,6 +83,20 @@ Zufall, ohne Login nutzbar), die der Inhaber an die Klasse weitergibt.
   Zertifikate (CN, OU, E-Mail, SAN, Antragsteller, Status, Laufzeit) aufklappt, und kann die Verwaltung im CSR-Detail deaktivieren (löscht
   Klassen-URL, Anfragen und gespeicherten Schlüssel).
 
+## Domain / Adressen
+
+Die Adresse des Dienstes (`*.workers.dev` oder eine eigene Domain) kann sich jederzeit ändern. Im
+Code ist deshalb **keine Domain fest eingetragen**: Der Server kennt seine Adresse nicht und liefert nur
+Pfade (z. B. `/ca/<Token>`). Absolute Adressen entstehen ausschließlich im Browser über
+`siteUrl()` (`public/api.js`) aus der Adresse, unter der die Seite gerade aufgerufen wird. Alle
+anderen Links sind relativ. Die Klassen-Token sind nicht an eine Domain gebunden: Wechselt die Domain,
+funktionieren bestehende Klassen-Adressen mit dem neuen Host weiter (nur der Host-Teil ändert sich).
+`test/links.test.ts` (Teil von `npm test`) verhindert, dass Domains fest eingetragen werden.
+
+**Ausnahme:** Die optionalen CRL-/AIA-URLs in Templates sind absolute Adressen, die der Admin selbst
+einträgt und die **dauerhaft in die ausgestellten Zertifikate eingebrannt** werden. Dafür nur Adressen
+verwenden, die dauerhaft stabil bleiben – oder die Felder leer lassen.
+
 ## Einrichtung
 
 ```bash

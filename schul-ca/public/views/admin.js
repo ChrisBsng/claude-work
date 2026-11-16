@@ -1,4 +1,4 @@
-import { call, download, esc, formatDate, formatDay } from "/api.js";
+import { call, download, esc, formatDate, formatDay, siteUrl } from "/api.js";
 
 const TOKEN_KEY = "schulCa.adminToken";
 const STATUS_LABELS = { pending: "Offen", approved: "Freigegeben", rejected: "Abgelehnt", issued: "Ausgestellt" };
@@ -202,7 +202,8 @@ function renderCsrDetail(box, csr, templates, root) {
 				<dt>Eingereicht</dt><dd>${esc(formatDate(csr.submittedAt))}</dd>
 				${csr.templateName ? `<dt>Template</dt><dd>${esc(csr.templateName)}</dd>` : ""}
 				${csr.rejectReason ? `<dt>Ablehnungsgrund</dt><dd>${esc(csr.rejectReason)}</dd>` : ""}
-				${csr.management ? `<dt>Verwaltung</dt><dd>aktiv · <a href="/ca/${esc(csr.management.token)}" target="_blank" rel="noopener">Klassen-Seite</a> · ${csr.management.requests} Anfragen · Schlüssel ${csr.management.keyStored ? "hinterlegt" : "nicht hinterlegt"}</dd>` : ""}
+				${csr.management ? `<dt>Verwaltung</dt><dd>aktiv · ${csr.management.requests} Anfragen · Schlüssel ${csr.management.keyStored ? "hinterlegt" : "nicht hinterlegt"}</dd>
+				<dt>Klassen-Adresse</dt><dd><a href="/ca/${esc(csr.management.token)}" target="_blank" rel="noopener" class="mono small">${esc(siteUrl(`/ca/${csr.management.token}`))}</a> <button type="button" class="secondary" id="copyClassUrl">Kopieren</button></dd>` : ""}
 				${csr.status === "issued" ? `<dt>Seriennummer</dt><dd class="mono small">${esc(csr.serialNumber)}</dd><dt>Gültig</dt><dd>${esc(formatDay(csr.notBefore))} – ${esc(formatDay(csr.notAfter))}</dd>` : ""}
 			</dl>
 			<div class="actions">
@@ -313,6 +314,7 @@ function renderCsrDetail(box, csr, templates, root) {
 		});
 	}
 	box.querySelectorAll("[data-cert]").forEach((b) => b.addEventListener("click", () => apiDownload(`/csrs/${csr.id}/certificate?format=${b.dataset.cert}`).catch((e) => alert(e.message))));
+	box.querySelector("#copyClassUrl")?.addEventListener("click", (e) => copyToClipboard(siteUrl(`/ca/${csr.management.token}`), e.target));
 	box.querySelector("#unmanage")?.addEventListener("click", () => {
 		if (confirm("Verwaltung deaktivieren? Klassen-Seite, Anfragen und ein hinterlegter Schlüssel werden gelöscht.")) {
 			run(() => api(`/csrs/${csr.id}/management`, { method: "DELETE" }), root, rerender);

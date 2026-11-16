@@ -9,7 +9,7 @@
 		"dev": "wrangler dev",
 		"deploy": "wrangler deploy",
 		"typecheck": "tsc --noEmit",
-		"test": "esbuild test/pki.test.ts --bundle --platform=node --format=cjs --outfile=.wrangler/pki.test.cjs --log-level=warning && node --test .wrangler/pki.test.cjs",
+		"test": "esbuild test/pki.test.ts test/links.test.ts --bundle --platform=node --format=cjs --outdir=.wrangler/tests --log-level=warning && node --test .wrangler/tests/pki.test.js .wrangler/tests/links.test.js",
 		"db:migrations:apply:local": "wrangler d1 migrations apply schul-ca-db --local",
 		"db:migrations:apply:remote": "wrangler d1 migrations apply schul-ca-db --remote",
 		"test:e2e": "esbuild test/e2e.ts --bundle --platform=node --format=esm --outfile=.wrangler/e2e.mjs --log-level=warning --banner:js=\"import{createRequire}from'module';const require=createRequire(import.meta.url);\" && node .wrangler/e2e.mjs"
