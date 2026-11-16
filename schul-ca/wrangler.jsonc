@@ -1,0 +1,23 @@
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "schul-ca",
+	"main": "src/index.ts",
+	"compatibility_date": "2026-09-28",
+	"compatibility_flags": ["nodejs_compat"],
+	"observability": {
+		"enabled": true
+	},
+	"assets": {
+		"directory": "./public",
+		"binding": "ASSETS",
+		"not_found_handling": "single-page-application",
+		"run_worker_first": ["/api/*"]
+	},
+	"d1_databases": [
+		{
+			"binding": "DB",
+			"database_name": "schul-ca-db",
+			"database_id": "4c2217aa-e7f5-4794-879e-3e0bc26d58e8"
+		}
+	]
+}
