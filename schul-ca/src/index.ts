@@ -16,7 +16,7 @@ const SECURITY_HEADERS: Record<string, string> = {
 	"Referrer-Policy": "no-referrer",
 	"X-Frame-Options": "DENY",
 	"Content-Security-Policy":
-		"default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
+		"default-src 'self'; img-src 'self' data:; font-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
 };
 
 export default {
