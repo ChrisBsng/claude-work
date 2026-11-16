@@ -85,6 +85,7 @@ export async function analyzeCsr(csrPem: string): Promise<CsrInfo> {
 		const v = first(f);
 		if (v) fields[f] = v;
 	}
+	if (!fields.CN) throw new PkiError("Der CSR enthält keinen Common Name (CN). Bitte die Klasse im CN angeben, z. B. -subj \"/CN=FI-25a\".");
 	return { subject: csr.subject, cn: fields.CN ?? null, fields, keyInfo: describeKey(alg) };
 }
 

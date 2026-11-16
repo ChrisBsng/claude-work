@@ -26,6 +26,7 @@ function normalizeCode(input: unknown): string | null {
 }
 const hashCode = (normalized: string) => sha256Hex(`csr-code:${normalized}`);
 
+// Öffentlich: Stammzertifikate (nur das Zertifikat, nie der Key) und Passworthinweis.
 // Öffentlich: Passworthinweis + ob die Schüleroberfläche überhaupt freigeschaltet ist.
 studentRouter.get("/public", async (_request: IRequest, env: Env) => {
 	const [hint, hash] = await Promise.all([getSetting(env.DB, "password_hint"), getSetting(env.DB, "student_password_hash")]);
@@ -52,7 +53,9 @@ studentRouter.post("/login", async (request: IRequest, env: Env) => {
 	return Response.json({ token: await issueToken(env, "student") });
 });
 
-studentRouter.get("/roots", requireStudent, async (_request: IRequest, env: Env) => {
+studentRouter.get("/session", requireStudent, () => Response.json({ ok: true }));
+
+studentRouter.get("/roots", async (_request: IRequest, env: Env) => {
 	const { results } = await env.DB.prepare(
 		"SELECT id, name, subject, fingerprint_sha256, key_algorithm, not_before, not_after FROM root_cas WHERE is_active = 1 AND not_after > ?1 ORDER BY name",
 	)
@@ -71,7 +74,7 @@ studentRouter.get("/roots", requireStudent, async (_request: IRequest, env: Env)
 	});
 });
 
-studentRouter.get("/roots/:id/download", requireStudent, async (request: IRequest, env: Env) => {
+studentRouter.get("/roots/:id/download", async (request: IRequest, env: Env) => {
 	const root = await env.DB.prepare("SELECT name, cert_pem FROM root_cas WHERE id = ?1 AND is_active = 1")
 		.bind(Number(request.params.id))
 		.first<{ name: string; cert_pem: string }>();

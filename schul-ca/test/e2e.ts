@@ -8,6 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as x509 from "@peculiar/x509";
 import { hmacSign, randomToken } from "../src/crypto";
+import { generateRoot } from "../src/pki";
 
 const BASE = process.env.BASE ?? "http://localhost:8799";
 const MASTER = process.env.MASTER_SECRET ?? "test-master-secret-0123456789abcdef";
@@ -62,7 +63,10 @@ assert.deepEqual(r.data, { passwordHint: "Der Name unserer Schule + Jahr", enabl
 step("Passwörter + Hinweis, Session-Invalidierung nach Passwortwechsel");
 
 // 4. Root erzeugen, Template anlegen
-r = await req("/api/admin/roots/generate", { token: admin, body: { name: "Schul-Root 2025", commonName: "Schule Muster Root CA", org: "Schule Muster", country: "DE", years: 10, keyType: "ec-p384" } });
+const offline = await generateRoot({ commonName: "Schule Muster Root CA", org: "Schule Muster", country: "DE", years: 10, keyType: "ec-p384" });
+const keyPem = x509.PemConverter.encode(offline.pkcs8 as any, "PRIVATE KEY");
+assert.equal((await req("/api/admin/roots/generate", { token: admin, body: {} })).status, 404, "Erzeugen im Worker entfernt");
+r = await req("/api/admin/roots/import", { token: admin, body: { name: "Schul-Root 2025", certPem: offline.info.certPem, keyPem } });
 assert.equal(r.status, 201, JSON.stringify(r.data));
 const rootId = r.data.root.id as number;
 r = await req("/api/admin/templates", { token: admin, body: { name: "Klasse", validityDays: 365, pathLen: 0, subjectOrg: "Schule Muster", subjectOrgUnit: "Klassen", subjectCountry: "de", permittedDns: "schule.example, .klasse.example" } });
@@ -81,17 +85,19 @@ assert.equal(r.status, 400, "Captcha ist einmalig einlösbar");
 r = await req("/api/student/login", { body: { password: "klasse2025", ...(await captcha("K7QM2")) } });
 assert.equal(r.status, 200);
 const student = r.data.token as string;
-assert.equal((await req("/api/student/roots")).status, 401);
-assert.equal((await req("/api/student/roots", { token: admin })).status, 401, "Admin-Token ist kein Schüler-Token");
+assert.equal((await req("/api/student/session")).status, 401);
+assert.equal((await req("/api/student/session", { token: admin })).status, 401, "Admin-Token ist kein Schüler-Token");
+assert.equal((await req("/api/student/csrs", { body: {} })).status, 401, "Upload nur angemeldet");
 step("Schüler-Login mit Captcha (einmalig) + Passwort");
 
-// 6. Root-Download
-r = await req("/api/student/roots", { token: student });
+// 6. Root-Download (öffentlich, ohne Login)
+r = await req("/api/student/roots");
 assert.equal(r.data.roots.length, 1);
-const dl = (await req(`/api/student/roots/${rootId}/download?format=pem`, { token: student, raw: true })) as Response;
+assert.ok(!JSON.stringify(r.data).includes("PRIVATE"));
+const dl = (await req(`/api/student/roots/${rootId}/download?format=pem`, { raw: true })) as Response;
 const rootPem = await dl.text();
 assert.match(rootPem, /BEGIN CERTIFICATE/);
-const der = new Uint8Array(await (await req(`/api/student/roots/${rootId}/download?format=der`, { token: student, raw: true }) as Response).arrayBuffer());
+const der = new Uint8Array(await (await req(`/api/student/roots/${rootId}/download?format=der`, { raw: true }) as Response).arrayBuffer());
 assert.equal(der[0], 0x30);
 step("Root-Download PEM/DER");
 
@@ -101,6 +107,10 @@ const keys = (await crypto.subtle.generateKey(alg, true, ["sign", "verify"])) as
 const csr = await x509.Pkcs10CertificateRequestGenerator.create({ name: "CN=FI-25a <script>", keys, signingAlgorithm: alg });
 r = await req("/api/student/csrs", { token: student, body: { rootId, label: "FI-25a", csrPem: "kein csr" } });
 assert.equal(r.status, 422);
+const noCn = await x509.Pkcs10CertificateRequestGenerator.create({ name: "O=Nur Org", keys, signingAlgorithm: alg });
+r = await req("/api/student/csrs", { token: student, body: { rootId, label: "x", csrPem: noCn.toString("pem") } });
+assert.equal(r.status, 422);
+assert.match(r.data.error, /Common Name/);
 r = await req("/api/student/csrs", { token: student, body: { rootId: 999, label: "FI-25a", csrPem: csr.toString("pem") } });
 assert.equal(r.status, 400);
 r = await req("/api/student/csrs", { token: student, body: { rootId, label: "FI-25a", csrPem: csr.toString("pem") } });
@@ -165,7 +175,7 @@ r = await req("/api/student/csrs/lookup", { token: student, body: { code: code2 
 assert.deepEqual([r.data.status, r.data.rejectReason], ["rejected", "Bitte Klassenbezeichnung im CN"]);
 assert.equal((await req(`/api/admin/roots/${rootId}`, { method: "DELETE", token: admin })).status, 409);
 assert.equal((await req(`/api/admin/roots/${rootId}`, { method: "PATCH", token: admin, body: { isActive: false } })).status, 200);
-assert.equal((await req("/api/student/roots", { token: student })).data.roots.length, 0);
+assert.equal((await req("/api/student/roots")).data.roots.length, 0);
 step("Ablehnen, Löschschutz, Deaktivieren");
 
 // 12. Rate-Limit Login

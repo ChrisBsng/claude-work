@@ -7,12 +7,10 @@ import { clientIp, rateLimitOk } from "../rateLimit";
 import {
 	analyzeCsr,
 	certPemToDer,
-	generateRoot,
 	issueIntermediate,
 	parseDnsList,
 	PkiError,
 	validateRootImport,
-	type KeyType,
 	type SubjectFields,
 } from "../pki";
 
@@ -140,26 +138,6 @@ adminRouter.post("/roots/import", requireAdmin, async (request: IRequest, env: E
 	if (!name || !body?.certPem || !body?.keyPem) return badRequest("Name, Zertifikat und Private Key sind erforderlich.");
 	try {
 		const { info, pkcs8 } = await validateRootImport(body.certPem, body.keyPem);
-		return await insertRoot(env, name, info, pkcs8);
-	} catch (e) {
-		if (e instanceof PkiError) return badRequest(e.message, 422);
-		throw e;
-	}
-});
-
-adminRouter.post("/roots/generate", requireAdmin, async (request: IRequest, env: Env) => {
-	const body = await readJson<{ name?: string; commonName?: string; org?: string; country?: string; years?: number; keyType?: KeyType }>(request);
-	const name = body?.name?.trim();
-	const commonName = body?.commonName?.trim();
-	const years = Number(body?.years);
-	const keyType = body?.keyType ?? "ec-p384";
-	if (!name || !commonName) return badRequest("Name und Common Name sind erforderlich.");
-	if (!Number.isInteger(years) || years < 1 || years > 30) return badRequest("Gültigkeit: 1–30 Jahre.");
-	if (!["ec-p256", "ec-p384", "rsa-3072", "rsa-4096"].includes(keyType)) return badRequest("Unbekannter Schlüsseltyp.");
-	const country = body?.country?.trim().toUpperCase();
-	if (country && !/^[A-Z]{2}$/.test(country)) return badRequest("Land: zweistelliger ISO-Code (z. B. DE).");
-	try {
-		const { info, pkcs8 } = await generateRoot({ commonName, org: body?.org?.trim() || undefined, country: country || undefined, years, keyType });
 		return await insertRoot(env, name, info, pkcs8);
 	} catch (e) {
 		if (e instanceof PkiError) return badRequest(e.message, 422);

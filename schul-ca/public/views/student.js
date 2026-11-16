@@ -11,94 +11,62 @@ const STATUS_LABELS = {
 const getToken = () => sessionStorage.getItem(TOKEN_KEY);
 const clearToken = () => sessionStorage.removeItem(TOKEN_KEY);
 
+// Seite = öffentlicher Teil (Anforderungen, Root-Downloads) + geschützter Teil
+// (CSR-Upload, Abruf), der erst nach Passwort + Captcha erscheint.
 export async function renderStudent(root) {
+	let loggedIn = false;
 	if (getToken()) {
 		try {
-			await call("/api/student/roots", { token: getToken() });
-			return renderPortal(root);
+			await call("/api/student/session", { token: getToken() });
+			loggedIn = true;
 		} catch {
 			clearToken();
 		}
 	}
-	renderLogin(root);
-}
+	const [roots, info] = await Promise.all([
+		call("/api/student/roots").then((r) => r.roots).catch(() => []),
+		call("/api/student/public").catch(() => ({ passwordHint: "", enabled: false })),
+	]);
 
-async function renderLogin(root) {
-	const info = await call("/api/student/public").catch(() => ({ passwordHint: "", enabled: false }));
 	root.innerHTML = `
-		<h1>Schul-CA</h1>
-		<p class="muted">Zwischenzertifikate für Klassen</p>
-		<div class="card narrow">
-			${
-				info.enabled
-					? `<form id="login" autocomplete="off">
-				<label>Anmeldepasswort
-					<input type="password" name="password" required autofocus />
-				</label>
-				${info.passwordHint ? `<p class="hint">💡 ${esc(info.passwordHint)}</p>` : ""}
-				<div class="captcha-row">
-					<div id="captcha" class="captcha" aria-live="polite">…</div>
-					<button type="button" class="secondary" id="reload" title="Neues Captcha">↻</button>
-				</div>
-				<label>Zeichen aus dem Bild
-					<input type="text" name="captcha" required autocomplete="off" autocapitalize="characters" maxlength="8" />
-				</label>
-				<p class="error" id="error" role="alert"></p>
-				<button type="submit">Anmelden</button>
-			</form>`
-					: `<p>Diese Seite ist noch nicht freigeschaltet. Bitte wende dich an die Administration.</p>`
-			}
-		</div>
+		<div class="topbar"><div><h1>Schul-CA</h1><p class="muted">Zwischenzertifikate für Klassen</p></div>
+			${loggedIn ? `<button class="secondary" id="logout">Abmelden</button>` : ""}</div>
+		${requirementsHtml()}
+		${rootsHtml(roots)}
+		<div id="protected"></div>
 		<p class="footer"><a href="/admin">Administration</a></p>`;
-	if (!info.enabled) return;
 
-	let captchaToken = "";
-	const loadCaptcha = async () => {
-		const box = root.querySelector("#captcha");
-		try {
-			const c = await call("/api/student/captcha");
-			captchaToken = c.token;
-			box.innerHTML = c.svg;
-		} catch (e) {
-			box.textContent = e.message;
-		}
-		const input = root.querySelector('[name="captcha"]');
-		if (input) input.value = "";
-	};
-	root.querySelector("#reload").addEventListener("click", loadCaptcha);
-	loadCaptcha();
-
-	root.querySelector("#login").addEventListener("submit", async (event) => {
-		event.preventDefault();
-		const form = event.currentTarget;
-		const err = root.querySelector("#error");
-		err.textContent = "";
-		try {
-			const { token } = await call("/api/student/login", {
-				method: "POST",
-				body: { password: form.password.value, captchaToken, captchaAnswer: form.captcha.value },
-			});
-			sessionStorage.setItem(TOKEN_KEY, token);
-			renderPortal(root);
-		} catch (e) {
-			err.textContent = e.message;
-			form.password.select();
-			loadCaptcha();
-		}
+	root.querySelector("#logout")?.addEventListener("click", () => {
+		clearToken();
+		renderStudent(root);
 	});
+	root.querySelectorAll("[data-dl]").forEach((btn) =>
+		btn.addEventListener("click", () => download(`/api/student/roots/${btn.dataset.dl}/download?format=${btn.dataset.format}`).catch((e) => alert(e.message))),
+	);
+
+	const box = root.querySelector("#protected");
+	if (loggedIn) renderPortal(root, box, roots);
+	else renderLogin(root, box, info);
 }
 
-async function renderPortal(root) {
-	const token = getToken();
-	let roots = [];
-	try {
-		roots = (await call("/api/student/roots", { token })).roots;
-	} catch (e) {
-		clearToken();
-		return renderLogin(root);
-	}
+function requirementsHtml() {
+	return `
+		<section class="card">
+			<h2>Mindestanforderungen an den CSR</h2>
+			<ul class="req">
+				<li><strong>Format:</strong> PKCS#10-CSR im PEM-Format (<code>-----BEGIN CERTIFICATE REQUEST-----</code>), höchstens 16 KB.</li>
+				<li><strong>Schlüssel:</strong> RSA mit mindestens <strong>2048 Bit</strong> oder EC auf der Kurve <strong>P-256, P-384 oder P-521</strong>. Andere Schlüsseltypen (z. B. Ed25519, RSA-PSS) werden abgelehnt.</li>
+				<li><strong>Signatur:</strong> Der CSR muss mit dem zugehörigen privaten Schlüssel selbst signiert sein (Proof of Possession). Beschädigte oder veränderte CSRs werden abgelehnt.</li>
+				<li><strong>Common Name:</strong> Der CSR muss einen <code>CN</code> enthalten, der die Klasse eindeutig bezeichnet (z. B. <code>FI-25a</code>).</li>
+				<li><strong>Private Key:</strong> bleibt bei euch – es wird nur der CSR hochgeladen, <strong>niemals</strong> die <code>.key</code>-Datei.</li>
+				<li><strong>Inhalt des Zertifikats:</strong> Der öffentliche Schlüssel kommt aus dem CSR. Organisation, Land usw. sowie alle Erweiterungen (CA-Zertifikat, Pfadlänge, Namensbeschränkungen, Laufzeit) legt die Schule per Vorlage fest; im CSR angeforderte Erweiterungen werden ignoriert.</li>
+				<li><strong>Freigabe:</strong> Jeder CSR wird von der Administration geprüft und kann mit Begründung abgelehnt werden.</li>
+			</ul>
+		</section>`;
+}
 
-	const rootList = roots.length
+function rootsHtml(roots) {
+	const list = roots.length
 		? roots
 				.map(
 					(r) => `<div class="root-item">
@@ -117,23 +85,90 @@ async function renderPortal(root) {
 				)
 				.join("")
 		: `<p class="muted">Aktuell ist kein Stammzertifikat verfügbar.</p>`;
+	return `<section class="card"><h2>Stammzertifikate herunterladen</h2>${list}</section>`;
+}
 
-	root.innerHTML = `
-		<div class="topbar"><h1>Schul-CA</h1><button class="secondary" id="logout">Abmelden</button></div>
+async function renderLogin(root, box, info) {
+	box.innerHTML = `
+		<section class="card narrow">
+			<h2>CSR einreichen &amp; Zertifikat abrufen</h2>
+			${
+				info.enabled
+					? `<p class="muted small">Dafür bitte mit dem Schulpasswort anmelden.</p>
+			<form id="login" autocomplete="off">
+				<label>Anmeldepasswort
+					<input type="password" name="password" required />
+				</label>
+				${info.passwordHint ? `<p class="hint">💡 ${esc(info.passwordHint)}</p>` : ""}
+				<div class="captcha-row">
+					<div id="captcha" class="captcha" aria-live="polite">…</div>
+					<button type="button" class="secondary" id="reload" title="Neues Captcha">↻</button>
+				</div>
+				<label>Zeichen aus dem Bild
+					<input type="text" name="captcha" required autocomplete="off" autocapitalize="characters" maxlength="8" />
+				</label>
+				<p class="error" id="error" role="alert"></p>
+				<button type="submit">Anmelden</button>
+			</form>`
+					: `<p>Der Bereich zum Einreichen ist noch nicht freigeschaltet. Bitte wende dich an die Administration.</p>`
+			}
+		</section>`;
+	if (!info.enabled) return;
 
+	let captchaToken = "";
+	const loadCaptcha = async () => {
+		const c = box.querySelector("#captcha");
+		try {
+			const res = await call("/api/student/captcha");
+			captchaToken = res.token;
+			c.innerHTML = res.svg;
+		} catch (e) {
+			c.textContent = e.message;
+		}
+		box.querySelector('[name="captcha"]').value = "";
+	};
+	box.querySelector("#reload").addEventListener("click", loadCaptcha);
+	loadCaptcha();
+
+	box.querySelector("#login").addEventListener("submit", async (event) => {
+		event.preventDefault();
+		const form = event.currentTarget;
+		const err = box.querySelector("#error");
+		err.textContent = "";
+		try {
+			const { token } = await call("/api/student/login", {
+				method: "POST",
+				body: { password: form.password.value, captchaToken, captchaAnswer: form.captcha.value },
+			});
+			sessionStorage.setItem(TOKEN_KEY, token);
+			renderStudent(root);
+		} catch (e) {
+			err.textContent = e.message;
+			form.password.select();
+			loadCaptcha();
+		}
+	});
+}
+
+function renderPortal(root, box, roots) {
+	const token = getToken();
+	const onAuthError = (e) => {
+		if (e.status === 401) {
+			clearToken();
+			renderStudent(root);
+			return true;
+		}
+		return false;
+	};
+
+	box.innerHTML = `
 		<section class="card">
-			<h2>1 · Stammzertifikat herunterladen</h2>
-			${rootList}
-		</section>
-
-		<section class="card">
-			<h2>2 · CSR hochladen</h2>
+			<h2>CSR hochladen</h2>
 			<details class="help">
 				<summary>Wie erzeuge ich einen CSR?</summary>
-				<p>Mit OpenSSL (Schlüssel bleibt bei dir – nur den CSR hochladen, <strong>niemals den .key</strong>):</p>
+				<p>Mit OpenSSL (der Schlüssel bleibt bei dir):</p>
 				<pre>openssl req -new -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \\
   -keyout klasse.key -out klasse.csr -subj "/CN=Klasse FI-25"</pre>
-				<p class="muted small">Erlaubt sind RSA ab 2048 Bit und EC (P-256/P-384/P-521). Gewünschte Felder wie Organisation legt die Administration per Template fest.</p>
 			</details>
 			<form id="upload">
 				<label>Stammzertifikat, von dem ausgestellt werden soll
@@ -153,7 +188,7 @@ async function renderPortal(root) {
 		</section>
 
 		<section class="card">
-			<h2>3 · Zertifikat abrufen</h2>
+			<h2>Status prüfen &amp; Zertifikat abrufen</h2>
 			<form id="lookup" class="inline-form">
 				<input type="text" name="code" required placeholder="Abruf-Code, z. B. K7QM-4TXD-9WPB-2HNC" autocomplete="off" autocapitalize="characters" />
 				<button type="submit">Status prüfen</button>
@@ -162,40 +197,20 @@ async function renderPortal(root) {
 			<div id="lookupResult"></div>
 		</section>`;
 
-	root.querySelector("#logout").addEventListener("click", () => {
-		clearToken();
-		renderLogin(root);
-	});
-
-	const onAuthError = (e) => {
-		if (e.status === 401) {
-			clearToken();
-			renderLogin(root);
-			return true;
-		}
-		return false;
-	};
-
-	root.querySelectorAll("[data-dl]").forEach((btn) =>
-		btn.addEventListener("click", () =>
-			download(`/api/student/roots/${btn.dataset.dl}/download?format=${btn.dataset.format}`, { token }).catch((e) => !onAuthError(e) && alert(e.message)),
-		),
-	);
-
-	root.querySelector("#csrFile").addEventListener("change", async (event) => {
+	box.querySelector("#csrFile").addEventListener("change", async (event) => {
 		const file = event.target.files[0];
 		if (!file) return;
 		if (file.size > 16 * 1024) {
-			root.querySelector("#uploadError").textContent = "Die Datei ist zu groß – ist das wirklich ein CSR?";
+			box.querySelector("#uploadError").textContent = "Die Datei ist zu groß – ist das wirklich ein CSR?";
 			return;
 		}
-		root.querySelector('[name="csr"]').value = await file.text();
+		box.querySelector('[name="csr"]').value = await file.text();
 	});
 
-	root.querySelector("#upload").addEventListener("submit", async (event) => {
+	box.querySelector("#upload").addEventListener("submit", async (event) => {
 		event.preventDefault();
 		const form = event.currentTarget;
-		const err = root.querySelector("#uploadError");
+		const err = box.querySelector("#uploadError");
 		err.textContent = "";
 		if (/PRIVATE KEY/.test(form.csr.value)) {
 			err.textContent = "Das sieht nach einem Private Key aus! Bitte nur den CSR (BEGIN CERTIFICATE REQUEST) einreichen.";
@@ -208,16 +223,16 @@ async function renderPortal(root) {
 				body: { rootId: Number(form.rootId.value), label: form.label.value, csrPem: form.csr.value },
 			});
 			form.reset();
-			const box = root.querySelector("#codeBox");
-			box.hidden = false;
-			box.innerHTML = `
+			const codeBox = box.querySelector("#codeBox");
+			codeBox.hidden = false;
+			codeBox.innerHTML = `
 				<div class="code-box">
 					<p><strong>CSR eingereicht.</strong> Dein Abruf-Code (wird nur jetzt einmalig angezeigt – bitte notieren!):</p>
-					<div class="code mono" id="theCode">${esc(result.code)}</div>
+					<div class="code mono">${esc(result.code)}</div>
 					<p class="muted small">${esc(result.subject)} · ${esc(result.keyInfo)}</p>
 					<button class="secondary" id="copyCode">Code kopieren</button>
 				</div>`;
-			box.querySelector("#copyCode").addEventListener("click", async (e) => {
+			codeBox.querySelector("#copyCode").addEventListener("click", async (e) => {
 				try {
 					await navigator.clipboard.writeText(result.code);
 					e.target.textContent = "Kopiert!";
@@ -225,29 +240,29 @@ async function renderPortal(root) {
 					// Zwischenablage nicht verfügbar – Code steht als Text da.
 				}
 			});
-			root.querySelector('#lookup [name="code"]').value = result.code;
+			box.querySelector('#lookup [name="code"]').value = result.code;
 		} catch (e) {
 			if (!onAuthError(e)) err.textContent = e.message;
 		}
 	});
 
-	root.querySelector("#lookup").addEventListener("submit", async (event) => {
+	box.querySelector("#lookup").addEventListener("submit", async (event) => {
 		event.preventDefault();
 		const code = event.currentTarget.code.value;
-		const err = root.querySelector("#lookupError");
-		const out = root.querySelector("#lookupResult");
+		const err = box.querySelector("#lookupError");
+		const out = box.querySelector("#lookupResult");
 		err.textContent = "";
 		out.innerHTML = "";
 		try {
 			const r = await call("/api/student/csrs/lookup", { method: "POST", token, body: { code } });
 			out.innerHTML = `
 				<div class="status status-${esc(r.status)}">${esc(STATUS_LABELS[r.status] ?? r.status)}</div>
+				${r.status === "rejected" ? `<div class="reject-note"><strong>Grund der Ablehnung:</strong> ${esc(r.rejectReason || "(keine Begründung angegeben)")}<br><span class="muted small">Du kannst einen korrigierten CSR erneut einreichen.</span></div>` : ""}
 				<dl>
 					<dt>Bezeichnung</dt><dd>${esc(r.label)}</dd>
 					<dt>Stammzertifikat</dt><dd>${esc(r.rootName)}</dd>
 					<dt>Eingereicht</dt><dd>${esc(formatDate(r.submittedAt))}</dd>
 					${r.status === "issued" ? `<dt>Gültig bis</dt><dd>${esc(formatDay(r.notAfter))}</dd>` : ""}
-					${r.rejectReason ? `<dt>Begründung</dt><dd>${esc(r.rejectReason)}</dd>` : ""}
 				</dl>
 				${
 					r.status === "issued"

@@ -178,9 +178,16 @@ function renderCsrDetail(box, csr, templates, root) {
 					<button type="submit" data-issue="1">Freigeben &amp; Zertifikat erzeugen</button>
 					<button type="submit" class="secondary" data-issue="0">Nur freigeben</button>
 					${csr.status === "approved" ? `<button type="button" id="issueNow">Zertifikat jetzt erzeugen</button>` : ""}
-					<button type="button" class="danger" id="reject">Ablehnen…</button>
+					
 				</div>
-			</form>`
+			</form>
+			<div class="reject-box">
+				<h3>Ablehnen</h3>
+				<label>Begründung (wird dem Schüler beim Abruf angezeigt)
+					<textarea id="rejectReason" rows="3" maxlength="300" placeholder="z. B. Bitte die Klassenbezeichnung im Common Name angeben."></textarea>
+				</label>
+				<button type="button" class="danger" id="reject">CSR ablehnen</button>
+			</div>`
 					: ""
 			}
 			${
@@ -229,8 +236,8 @@ function renderCsrDetail(box, csr, templates, root) {
 			}, root, rerender),
 		);
 		box.querySelector("#reject").addEventListener("click", () => {
-			const reason = prompt("Ablehnungsgrund (wird dem Schüler angezeigt, optional):");
-			if (reason === null) return;
+			const reason = box.querySelector("#rejectReason").value.trim();
+			if (!reason && !confirm("Ohne Begründung ablehnen?")) return;
 			run(() => api(`/csrs/${csr.id}/reject`, { method: "POST", body: { reason } }), root, rerender);
 		});
 	}
@@ -266,30 +273,15 @@ async function renderRoots(panel, root) {
 			}</tbody>
 		</table>
 
-		<div class="two-col">
+		<div class="card-wrap">
 			<form class="card" id="import">
-				<h3>Vorhandene Root-CA importieren</h3>
+				<h3>Root-CA importieren (offline erzeugt)</h3>
 				<label>Anzeigename<input name="name" required maxlength="80" /></label>
 				<label>Zertifikat (PEM)<textarea name="certPem" rows="5" required spellcheck="false" placeholder="-----BEGIN CERTIFICATE-----"></textarea></label>
 				<label>Private Key (PKCS#8, unverschlüsselt)<textarea name="keyPem" rows="5" required spellcheck="false" placeholder="-----BEGIN PRIVATE KEY-----"></textarea></label>
 				<p class="muted small">Der Key wird mit AES-256-GCM verschlüsselt gespeichert (Schlüssel aus dem Worker-Secret <code>MASTER_SECRET</code>) und verlässt den Server nie. Bei Bedarf umwandeln: <code>openssl pkcs8 -topk8 -nocrypt -in key.pem -out key-pkcs8.pem</code></p>
 				<p class="error" data-error></p>
 				<button type="submit">Importieren</button>
-			</form>
-			<form class="card" id="generate">
-				<h3>Neue Root-CA erzeugen</h3>
-				<label>Anzeigename<input name="name" required maxlength="80" /></label>
-				<label>Common Name<input name="commonName" required placeholder="Schule Muster Root CA" /></label>
-				<div class="grid"><label>Organisation<input name="org" /></label><label>Land<input name="country" maxlength="2" placeholder="DE" /></label></div>
-				<div class="grid">
-					<label>Gültigkeit (Jahre)<input type="number" name="years" min="1" max="30" value="10" required /></label>
-					<label>Schlüssel
-						<select name="keyType"><option value="ec-p384">EC P-384 (empfohlen)</option><option value="ec-p256">EC P-256</option><option value="rsa-3072">RSA 3072</option><option value="rsa-4096">RSA 4096 (langsam)</option></select>
-					</label>
-				</div>
-				<p class="muted small">Für eine Schul-Root empfiehlt sich meist eine offline erzeugte Root-CA und der Import – die hier erzeugte liegt dauerhaft auf dem Server.</p>
-				<p class="error" data-error></p>
-				<button type="submit">Erzeugen</button>
 			</form>
 		</div>`;
 
@@ -321,13 +313,10 @@ async function renderRoots(panel, root) {
 				}
 				err.textContent = e.message;
 				button.disabled = false;
-				button.textContent = formId === "#import" ? "Importieren" : "Erzeugen";
+				button.textContent = "Importieren";
 			}
 		});
 	submit("#import", "/roots/import", (f) => ({ name: f.name.value, certPem: f.certPem.value, keyPem: f.keyPem.value }));
-	submit("#generate", "/roots/generate", (f) => ({
-		name: f.name.value, commonName: f.commonName.value, org: f.org.value, country: f.country.value, years: Number(f.years.value), keyType: f.keyType.value,
-	}));
 }
 
 // ---- Templates ----------------------------------------------------------------

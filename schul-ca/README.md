@@ -2,12 +2,14 @@
 
 Cloudflare Worker + D1, gleicher Aufbau wie `pausen-checkin`.
 
-**Schüler** (`/`): Anmeldung mit Schulpasswort + Captcha → Stammzertifikat(e) herunterladen →
-CSR hochladen (Auswahl des Stammzertifikats) → einmalig angezeigter Abruf-Code → Status prüfen
-und Zertifikat bzw. Kette herunterladen.
+**Öffentlich** (`/`, ohne Login): Mindestanforderungen an den CSR und Download der Stammzertifikate
+(nur das Zertifikat).
+
+**Schüler** (nach Schulpasswort + Captcha): CSR hochladen (Auswahl des Stammzertifikats) →
+einmalig angezeigter Abruf-Code → Status/Ablehnungsgrund prüfen und Zertifikat bzw. Kette herunterladen.
 
 **Admin** (`/admin`): CSR-Queue (freigeben mit Template / ablehnen / Zertifikat erzeugen),
-Stammzertifikate (importieren oder erzeugen, aktiv/inaktiv), Templates, Schüler-/Admin-Passwort
+Stammzertifikate (nur Import von Zertifikat + Key, die Root wird offline erzeugt; aktiv/inaktiv), Templates, Schüler-/Admin-Passwort
 und Passworthinweis.
 
 ## Wichtige Designentscheidungen
@@ -31,7 +33,7 @@ und Passworthinweis.
   ausschließlich aus dem Template (BasicConstraints CA:TRUE kritisch + Pfadlänge, KeyUsage
   keyCertSign/cRLSign, SKI/AKI, optional Name Constraints, CRL-DP, AIA). Im CSR angeforderte
   Extensions werden ignoriert. Die Laufzeit wird auf die Gültigkeit des Stammzertifikats gekürzt.
-* CSRs werden abgelehnt bei ungültiger Signatur, RSA < 2048 Bit oder nicht unterstützter Kurve.
+* CSRs werden abgelehnt bei ungültiger Signatur, fehlendem CN, RSA < 2048 Bit oder nicht unterstützter Kurve (steht auch öffentlich auf der Startseite).
 
 ## Einrichtung
 
@@ -66,8 +68,6 @@ E2E gegen einen laufenden `wrangler dev` (Secrets: `ADMIN_PASSWORD=startpass-123
 
 ## Hinweise / Grenzen
 
-* RSA-Schlüsselerzeugung (beim „Root-CA erzeugen“) ist CPU-intensiv; auf dem Free-Plan
-  (10 ms CPU) ist EC P-384 bzw. der Import einer offline erzeugten Root-CA die sichere Wahl.
-  PBKDF2 mit 100k Iterationen und Signieren sind im Pausen-Tool bereits so im Einsatz.
+* PBKDF2 mit 100k Iterationen und Signieren sind im Pausen-Tool bereits so im Einsatz.
 * Keine CRL/OCSP-Erzeugung und kein Widerruf – nur die Verweis-URLs im Template.
 * Import: Private Key muss unverschlüsseltes PKCS#8 sein (Hinweis zur Umwandlung steht in der UI).
