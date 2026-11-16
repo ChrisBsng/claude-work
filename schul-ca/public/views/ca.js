@@ -193,11 +193,11 @@ export async function renderCa(root, token) {
 
 	// ---- Inhaber-Bereich
 	const ownerDetails = root.querySelector("#ownerDetails");
-	let ownerCode = sessionStorage.getItem(ownerKey(token)) ?? "";
+	let ownerToken = sessionStorage.getItem(ownerKey(token)) ?? "";
 	async function fetchOwner(path, { method = "GET", body } = {}) {
 		const res = await fetch(`${base}/owner${path}`, {
 			method,
-			headers: { "X-Owner-Code": ownerCode, ...(body ? { "Content-Type": "application/json" } : {}) },
+			headers: { Authorization: `Bearer ${ownerToken}`, ...(body ? { "Content-Type": "application/json" } : {}) },
 			body: body ? JSON.stringify(body) : undefined,
 		});
 		const json = await res.json().catch(() => null);
@@ -207,16 +207,27 @@ export async function renderCa(root, token) {
 
 	const renderOwnerLocked = (message = "") => {
 		root.querySelector("#ownerContent").innerHTML = `
-			<form id="unlock" class="inline-form" style="margin-top:12px">
-				<input name="code" required placeholder="Abruf-Code der Zwischenzertifizierungsstelle" value="${esc(ownerCode)}" autocomplete="off" autocapitalize="characters" />
+			<form id="unlock" class="narrow-form" style="margin-top:12px" autocomplete="off">
+				<label>Abruf-Code der Zwischenzertifizierungsstelle
+					<input name="code" required placeholder="z. B. K7QM-4TXD-9WPB-2HNC" autocomplete="off" autocapitalize="characters" />
+				</label>
+				<div data-captcha></div>
+				<p class="error" data-error>${esc(message)}</p>
 				<button type="submit">Entsperren</button>
 			</form>
-			<p class="error">${esc(message)}</p>
-			<p class="muted small">Den Abruf-Code hast du beim Einreichen deines CSR erhalten. Er schützt diesen Bereich – bitte nicht an die Klasse weitergeben, nur die Adresse dieser Seite.</p>`;
-		root.querySelector("#unlock").addEventListener("submit", (e) => {
+			<p class="muted small">Den Abruf-Code hast du beim Beantragen deines Zwischenzertifikats erhalten. Er schützt diesen Bereich – bitte nicht an die Klasse weitergeben, nur die Adresse dieser Seite.</p>`;
+		const captcha = mountCaptcha(root.querySelector("#unlock [data-captcha]"));
+		root.querySelector("#unlock").addEventListener("submit", async (e) => {
 			e.preventDefault();
-			ownerCode = e.currentTarget.code.value;
-			loadOwner();
+			const f = e.currentTarget;
+			try {
+				const res = await call(`${base}/owner/login`, { method: "POST", body: { code: f.code.value, ...captcha.values() } });
+				ownerToken = res.ownerToken;
+				loadOwner();
+			} catch (err) {
+				f.querySelector("[data-error]").textContent = err.message;
+				captcha.reload();
+			}
 		});
 	};
 
@@ -226,9 +237,10 @@ export async function renderCa(root, token) {
 			state = await fetchOwner("");
 		} catch (e) {
 			sessionStorage.removeItem(ownerKey(token));
-			return renderOwnerLocked(e.status === 401 ? "Abruf-Code ungültig." : e.message);
+			ownerToken = "";
+			return renderOwnerLocked(e.status === 401 ? "Die Inhaber-Sitzung ist abgelaufen oder ungültig. Bitte erneut mit Abruf-Code und Captcha anmelden." : e.message);
 		}
-		sessionStorage.setItem(ownerKey(token), ownerCode);
+		sessionStorage.setItem(ownerKey(token), ownerToken);
 		const host = root.querySelector("#ownerContent");
 		host.innerHTML = `
 			<h3 style="margin-top:16px">Anfragen</h3>
@@ -337,8 +349,8 @@ export async function renderCa(root, token) {
 		form.querySelector('[data-do="close"]').addEventListener("click", () => (box.innerHTML = ""));
 	}
 
-	if (ownerCode) {
-		ownerDetails.open = location.hash === "#owner" || Boolean(ownerCode);
+	if (ownerToken) {
+		ownerDetails.open = true;
 		loadOwner();
 	} else {
 		renderOwnerLocked();

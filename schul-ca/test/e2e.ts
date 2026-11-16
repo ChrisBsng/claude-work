@@ -32,6 +32,9 @@ async function captcha(answer: string) {
 
 const step = (s: string) => console.log("•", s);
 
+// Abruf mit Abruf-Code + Captcha – bewusst OHNE Schülerpasswort/-Session.
+const lookup = async (c: string) => req("/api/student/csrs/lookup", { body: { code: c, ...(await captcha("LOOKP")) } });
+
 // 1. Schüler gesperrt, solange kein Passwort gesetzt ist
 let r = await req("/api/student/public");
 assert.equal(r.data.enabled, false);
@@ -128,10 +131,18 @@ assert.match(code, /^[A-Z2-9]{4}(-[A-Z2-9]{4}){3}$/);
 step(`CSR hochgeladen, Code ${code}`);
 
 // 8. Status vor Freigabe
-r = await req("/api/student/csrs/lookup", { token: student, body: { code: code.toLowerCase().replace(/-/g, " ") } });
+assert.equal((await req("/api/student/csrs/lookup", { body: { code } })).status, 400, "Abruf ohne Captcha abgelehnt");
+assert.equal((await req("/api/student/csrs/lookup", { body: { code, ...(await captcha("AAAAA")), captchaAnswer: "FALSCH" } })).status, 400, "Abruf mit falschem Captcha abgelehnt");
+r = await lookup(code.toLowerCase().replace(/-/g, " "));
+assert.equal(r.status, 200, "Abruf nur mit Code + Captcha, ohne Schülerpasswort");
 assert.equal(r.data.status, "pending");
-assert.equal((await req("/api/student/csrs/lookup", { token: student, body: { code: "AAAA-BBBB-CCCC-DDDD" } })).status, 404);
-assert.equal((await req("/api/student/csrs/certificate", { token: student, body: { code } })).status, 409);
+const pickup = r.data.pickupToken as string;
+assert.ok(pickup);
+assert.equal((await lookup("AAAA-BBBB-CCCC-DDDD")).status, 404);
+assert.equal((await req("/api/student/csrs/certificate", { body: { format: "pem" } })).status, 401, "Download ohne Abruf-Sitzung");
+assert.equal((await req("/api/student/csrs/certificate", { token: student, body: { format: "pem" } })).status, 401, "Schüler-Session ersetzt keine Abruf-Sitzung");
+assert.equal((await req("/api/student/csrs/certificate", { token: pickup.slice(0, -2) + "xx", body: { format: "pem" } })).status, 401, "manipuliertes Token");
+assert.equal((await req("/api/student/csrs/certificate", { token: pickup, body: { format: "pem" } })).status, 409);
 
 // 9. Admin: Queue, freigeben + ausstellen
 r = await req("/api/admin/csrs?status=pending", { token: admin });
@@ -140,7 +151,7 @@ const csrId = r.data.csrs[0].id;
 r = await req(`/api/admin/csrs/${csrId}`, { token: admin });
 assert.equal(r.data.csr.csrFields.CN, "FI-25a <script>");
 assert.deepEqual([r.data.csr.contactPerson, r.data.csr.contactMethod, r.data.csr.contactDetail], ["Max Mustermann", "email", "max@schule.example"]);
-assert.ok(!JSON.stringify((await req("/api/student/csrs/lookup", { token: student, body: { code } })).data).includes("max@schule"), "Kontaktdaten nicht für Schüler abrufbar");
+assert.ok(!JSON.stringify((await lookup(code)).data).includes("max@schule"), "Kontaktdaten nicht für Schüler abrufbar");
 assert.equal((await req(`/api/admin/csrs/${csrId}/issue`, { method: "POST", token: admin, body: {} })).status, 409, "ohne Freigabe kein Ausstellen");
 r = await req(`/api/admin/csrs/${csrId}/approve`, {
 	token: admin,
@@ -151,9 +162,9 @@ assert.equal(r.data.status, "issued");
 step("Admin: freigegeben + ausgestellt");
 
 // 10. Schüler holt Kette ab und OpenSSL verifiziert
-r = await req("/api/student/csrs/lookup", { token: student, body: { code } });
+r = await lookup(code);
 assert.equal(r.data.status, "issued");
-const chain = await (await req("/api/student/csrs/certificate", { token: student, body: { code, format: "chain" }, raw: true }) as Response).text();
+const chain = await (await req("/api/student/csrs/certificate", { token: r.data.pickupToken, body: { format: "chain" }, raw: true }) as Response).text();
 const dir = mkdtempSync(join(tmpdir(), "e2e-"));
 writeFileSync(join(dir, "chain.pem"), chain);
 writeFileSync(join(dir, "root.pem"), rootPem);
@@ -175,15 +186,17 @@ try {
 step("Zertifikatskette vom Schüler abgerufen, OpenSSL-Verifikation OK");
 
 // 10b. Zwischen-CA verwalten: Klassen-URL, Quick-Zertifikat, Inhaber-Freigabe
-r = await req("/api/student/csrs/lookup", { token: student, body: { code } });
+r = await lookup(code);
 assert.deepEqual(r.data.management, { enabled: false, token: null, keyStored: false });
-assert.equal((await req("/api/student/csrs/manage", { token: student, body: { code: "AAAA-BBBB-CCCC-DDDD", enable: true } })).status, 404);
-assert.equal((await req("/api/student/csrs/manage", { body: { code, enable: true } })).status, 401);
-r = await req("/api/student/csrs/manage", { token: student, body: { code, enable: true } });
+const pk = r.data.pickupToken as string;
+assert.equal((await req("/api/student/csrs/manage", { token: "1.2.x", body: { enable: true } })).status, 401);
+assert.equal((await req("/api/student/csrs/manage", { body: { enable: true } })).status, 401);
+assert.equal((await req("/api/student/csrs/manage", { token: student, body: { enable: true } })).status, 401, "Schüler-Session reicht nicht für Verwaltung");
+r = await req("/api/student/csrs/manage", { token: pk, body: { enable: true } });
 assert.equal(r.status, 201);
 const caToken = r.data.token as string;
 assert.match(caToken, /^[A-Za-z0-9_-]{22}$/);
-assert.equal((await req("/api/student/csrs/manage", { token: student, body: { code, enable: true } })).data.token, caToken, "idempotent");
+assert.equal((await req("/api/student/csrs/manage", { token: pk, body: { enable: true } })).data.token, caToken, "idempotent");
 step("Verwaltung aktiviert, Klassen-URL /ca/" + caToken.slice(0, 6) + "…");
 
 // öffentliche Ressource ohne Login
@@ -234,9 +247,18 @@ assert.equal(r.data.certificates.find((c: any) => c.id === quickId).san, "web.sc
 
 // Inhaber: nur mit Abruf-Code
 assert.equal((await req(`/api/ca/${caToken}/owner`)).status, 401);
-const ownerReq = async (path: string, method: string, body?: unknown, ownerCode = code) =>
-	(await fetch(`${BASE}/api/ca/${caToken}/owner${path}`, { method, headers: { "X-Owner-Code": ownerCode, ...(body ? { "Content-Type": "application/json" } : {}) }, body: body ? JSON.stringify(body) : undefined }).then(async (res) => ({ status: res.status, data: (await res.json().catch(() => null)) as any })));
-assert.equal((await ownerReq("", "GET", undefined, "AAAA-BBBB-CCCC-DDDD")).status, 401);
+// Anmeldung: Abruf-Code + Captcha -> Inhaber-Token
+assert.equal((await req(`/api/ca/${caToken}/owner/login`, { body: { code } })).status, 400, "Inhaber-Login ohne Captcha");
+assert.equal((await req(`/api/ca/${caToken}/owner/login`, { body: { code: "AAAA-BBBB-CCCC-DDDD", ...(await captcha("OWNER")) } })).status, 401, "falscher Code");
+r = await req(`/api/ca/${caToken}/owner/login`, { body: { code, ...(await captcha("OWNER")) } });
+assert.equal(r.status, 200);
+const ownerToken = r.data.ownerToken as string;
+const ownerReq = async (path: string, method: string, body?: unknown, tokenOverride = ownerToken) =>
+	(await fetch(`${BASE}/api/ca/${caToken}/owner${path}`, { method, headers: { Authorization: `Bearer ${tokenOverride}`, ...(body ? { "Content-Type": "application/json" } : {}) }, body: body ? JSON.stringify(body) : undefined }).then(async (res) => ({ status: res.status, data: (await res.json().catch(() => null)) as any })));
+assert.equal((await ownerReq("", "GET", undefined, "garbage")).status, 401);
+assert.equal((await ownerReq("", "GET", undefined, student)).status, 401, "Schüler-Token ist kein Inhaber-Token");
+assert.equal((await ownerReq("", "GET", undefined, ownerToken.slice(0, -2) + "xx")).status, 401, "manipuliertes Inhaber-Token");
+assert.equal((await ownerReq("", "GET", undefined, pk)).status, 200, "Abruf-Sitzung aus dem Schülerportal öffnet den Inhaber-Bereich");
 r = await ownerReq("", "GET");
 assert.equal(r.status, 200);
 assert.equal(r.data.keyStored, false);
@@ -326,7 +348,7 @@ assert.ok(r.data.leaves.every((l: any) => l.ou && l.email), "OU und E-Mail zu je
 assert.equal((await req(`/api/admin/csrs/${csrId}/leaves`)).status, 401);
 assert.equal((await req(`/api/admin/csrs/${csrId}/management`, { method: "DELETE", token: admin })).status, 200);
 assert.equal((await req(`/api/ca/${caToken}`)).status, 404, "Klassen-URL nach Deaktivierung weg");
-assert.equal((await req("/api/student/csrs/lookup", { token: student, body: { code } })).data.management.enabled, false);
+assert.equal((await lookup(code)).data.management.enabled, false);
 step("Key löschen, Admin deaktiviert Verwaltung");
 
 // 11. Ablehnen-Flow, Löschschutz
@@ -336,7 +358,7 @@ r = await req("/api/student/csrs", { token: student, body: { rootId, label: "FI-
 const code2 = r.data.code;
 const id2 = (await req("/api/admin/csrs?status=pending", { token: admin })).data.csrs[0].id;
 assert.equal((await req(`/api/admin/csrs/${id2}/reject`, { token: admin, body: { reason: "Bitte Klassenbezeichnung im CN" } })).status, 200);
-r = await req("/api/student/csrs/lookup", { token: student, body: { code: code2 } });
+r = await lookup(code2);
 assert.deepEqual([r.data.status, r.data.rejectReason], ["rejected", "Bitte Klassenbezeichnung im CN"]);
 assert.equal((await req(`/api/admin/roots/${rootId}`, { method: "DELETE", token: admin })).status, 409);
 assert.equal((await req(`/api/admin/roots/${rootId}`, { method: "PATCH", token: admin, body: { isActive: false } })).status, 200);

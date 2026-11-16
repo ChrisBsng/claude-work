@@ -5,8 +5,14 @@ Cloudflare Worker + D1, gleicher Aufbau wie `pausen-checkin`.
 **Öffentlich** (`/`, ohne Login): Mindestanforderungen an den CSR und Download der Stammzertifikate
 (nur das Zertifikat).
 
-**Schüler** (nach Schulpasswort + Captcha): CSR hochladen (Auswahl des Stammzertifikats) →
-einmalig angezeigter Abruf-Code → Status/Ablehnungsgrund prüfen und Zertifikat bzw. Kette herunterladen.
+**Zwei getrennte Zugänge auf der Startseite:**
+
+1. *Neues Zwischenzertifikat beantragen* – **Schulpasswort + Captcha**, danach CSR-Upload (Auswahl
+   des Stammzertifikats, Kontaktangaben) und einmalige Anzeige des Abruf-Codes.
+2. *Status prüfen, Zertifikat abrufen & verwalten* – **Abruf-Code + Captcha**, ohne Schulpasswort.
+   Daraus entsteht eine kurzlebige **Abruf-Sitzung** (2 h, an genau diesen CSR gebunden): Download
+   des Zertifikats, Verwaltung aktivieren/deaktivieren, Zugang zum Inhaber-Bereich der Klassen-Seite.
+   Das Schulpasswort wird dafür nicht benötigt, der Abruf-Code ersetzt es nicht beim Beantragen.
 
 **Admin** (`/admin`): CSR-Queue (freigeben mit Template / ablehnen / Zertifikat erzeugen),
 Stammzertifikate (nur Import von Zertifikat + Key, die Root wird offline erzeugt; aktiv/inaktiv), Templates, Schüler-/Admin-Passwort
@@ -47,7 +53,7 @@ Zufall, ohne Login nutzbar), die der Inhaber an die Klasse weitergibt.
   eigenem CSR oder **Quick-Zertifikat** (CN, OU, SAN, E → Schlüssel und CSR werden serverseitig
   erzeugt; der Private Key steht nur in der Antwort, wird nicht gespeichert und ist nur einmal
   herunterladbar). Einreichen erfordert Captcha, Rate-Limit und ist je Zwischen-CA auf 300 Anfragen begrenzt.
-* **Inhaber-Bereich (Abruf-Code):** Anfragen prüfen, Subject/SAN/Laufzeit anpassen, freigeben
+* **Inhaber-Bereich (Abruf-Code + Captcha bzw. Abruf-Sitzung):** Anfragen prüfen, Subject/SAN/Laufzeit anpassen, freigeben
   (= ausstellen) oder mit Grund ablehnen. Den Schlüssel der Zwischen-CA kann der Inhaber
   **dauerhaft hinterlegen** (AES-256-GCM, eigener abgeleiteter Schlüssel `ca-key`) oder bei jeder
   Freigabe **neu hochladen** (wird nur im Request verwendet). Ein hinterlegter Schlüssel ist für die

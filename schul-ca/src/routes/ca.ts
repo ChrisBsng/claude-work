@@ -1,6 +1,7 @@
 import { Router, type IRequest } from "itty-router";
 import { verifyCaptcha } from "../captcha";
 import { hashCode, normalizeCode } from "../codes";
+import { createPickupToken, pickupCsrId } from "../pickup";
 import { constantTimeEqual, decryptSecret, encryptSecret } from "../crypto";
 import type { Env } from "../env";
 import { badRequest, fileResponse, MIME, readJson, safeName } from "../http";
@@ -59,12 +60,11 @@ async function loadCa(env: Env, token: string): Promise<CaRow | null> {
 
 const notFound = () => badRequest("Diese Zwischenzertifizierungsstelle wurde nicht gefunden.", 404);
 
-// Inhaber-Authentifizierung über den Abruf-Code (Header X-Owner-Code).
+// Inhaber-Authentifizierung: Abruf-Sitzung (Token aus Abruf-Code + Captcha), gebunden an genau diese Zwischen-CA.
 async function requireOwner(request: IRequest, env: Env, ca: CaRow): Promise<Response | void> {
-	if (!(await rateLimitOk(env, `ca-owner:${clientIp(request)}`, 60, 900))) return badRequest("Zu viele Anfragen.", 429);
-	const code = normalizeCode(request.headers.get("X-Owner-Code"));
-	const ok = code ? constantTimeEqual(await hashCode(code), ca.code_hash) : false;
-	if (!ok) return badRequest("Abruf-Code ungültig.", 401);
+	if (!(await rateLimitOk(env, `ca-owner:${clientIp(request)}`, 120, 900))) return badRequest("Zu viele Anfragen.", 429);
+	const csrId = await pickupCsrId(env, request);
+	if (csrId === null || csrId !== ca.csr_id) return badRequest("Inhaber-Sitzung ungültig oder abgelaufen. Bitte mit dem Abruf-Code anmelden.", 401);
 }
 
 interface LeafRow {
@@ -242,7 +242,19 @@ caRouter.post("/:token/quick", async (request: IRequest, env: Env) => {
 	}
 });
 
-// ---- Inhaber (X-Owner-Code) ------------------------------------------------------
+// ---- Inhaber (Abruf-Sitzung) --------------------------------------------------------
+
+// Inhaber-Anmeldung auf der Klassen-Seite: Abruf-Code + Captcha -> Abruf-Sitzung.
+caRouter.post("/:token/owner/login", async (request: IRequest, env: Env) => {
+	const ca = await loadCa(env, request.params.token);
+	if (!ca) return notFound();
+	if (!(await rateLimitOk(env, `ca-owner-login:${clientIp(request)}`, 15, 900))) return badRequest("Zu viele Anmeldeversuche. Bitte in einigen Minuten erneut versuchen.", 429);
+	const body = await readJson<{ code?: string; captchaToken?: string; captchaAnswer?: string }>(request);
+	if (!(await verifyCaptcha(env, body?.captchaToken, body?.captchaAnswer))) return badRequest("Captcha falsch oder abgelaufen. Bitte ein neues lösen.");
+	const code = normalizeCode(body?.code);
+	if (!code || !constantTimeEqual(await hashCode(code), ca.code_hash)) return badRequest("Abruf-Code ungültig.", 401);
+	return Response.json({ ownerToken: await createPickupToken(env, ca.csr_id) });
+});
 
 caRouter.get("/:token/owner", async (request: IRequest, env: Env) => {
 	const ca = await loadCa(env, request.params.token);

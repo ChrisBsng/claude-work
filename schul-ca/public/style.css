@@ -162,3 +162,6 @@ button.expand { padding: 0; width: 28px; height: 28px; line-height: 1; border-ra
 td.expander { width: 40px; }
 tr.leaf-row > td { background: var(--color-surface2); padding: 10px 12px; }
 table.sub { box-shadow: none; font-size: 0.85rem; }
+.card-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 8px; }
+.card-head h2 { margin: 0; }
+.narrow-form { max-width: 420px; }
