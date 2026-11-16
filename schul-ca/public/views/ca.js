@@ -1,12 +1,11 @@
-import { call, download, esc, formatDate, formatDay } from "/api.js";
+import { call, download, esc, formatDay } from "/api.js";
 import { mountCaptcha } from "/captcha.js";
+import { caBase, renderCertTable } from "/views/ca-shared.js";
 
-const STATUS = { pending: "Offen", issued: "Ausgestellt", rejected: "Abgelehnt" };
-const KIND = { csr: "CSR", quick: "Quick" };
-const ownerKey = (token) => `schulCa.owner.${token}`;
-
+// Klassen-Seite /ca/<Token>: öffentlich, ohne Anmeldung. Nur Downloads, Tabelle und neue Anfragen.
+// Die Verwaltung (Inhaber) liegt bewusst auf einer eigenen Seite: /ca/<Token>/verwalten.
 export async function renderCa(root, token) {
-	const base = `/api/ca/${encodeURIComponent(token)}`;
+	const base = caBase(token);
 	let data;
 	try {
 		data = await call(base);
@@ -18,6 +17,7 @@ export async function renderCa(root, token) {
 
 	const permitted = data.permittedDns.length ? data.permittedDns.map((d) => `<code>${esc(d)}</code>`).join(" ") : "keine Einschränkung";
 	root.innerHTML = `
+		<p class="crumbs"><a href="/">← Startseite</a></p>
 		<header class="page-head">
 			<span class="badge-pill">Zwischenzertifizierungsstelle</span>
 			<h1>${esc(data.name)}</h1>
@@ -87,12 +87,7 @@ export async function renderCa(root, token) {
 			<div id="quickResult"></div>
 		</section>
 
-		<section class="card" id="ownerBox">
-			<details id="ownerDetails">
-				<summary><strong>Inhaber-Bereich</strong> – Anfragen freigeben, Schlüssel verwalten</summary>
-				<div id="ownerContent"></div>
-			</details>
-		</section>`;
+<p class="owner-link small muted">Du bist Inhaber dieser Zwischenzertifizierungsstelle? <a href="/ca/${esc(token)}/verwalten">Zur Verwaltung →</a></p>`;
 
 	// ---- Downloads Zwischenzertifikat
 	root.querySelectorAll("[data-ca]").forEach((b) =>
@@ -100,45 +95,11 @@ export async function renderCa(root, token) {
 	);
 
 	// ---- Tabelle
-	const renderTable = (certs, host, { owner = false, onAction } = {}) => {
-		if (!certs.length) {
-			host.innerHTML = `<p class="muted">Noch keine Anfragen.</p>`;
-			return;
-		}
-		host.innerHTML = `<div class="table-wrap"><table>
-			<thead><tr><th>Art</th><th>Common Name</th><th>OU</th><th>SAN</th><th>Status</th><th>Gültig bis</th><th></th></tr></thead>
-			<tbody>${certs
-				.map(
-					(c) => `<tr>
-				<td>${esc(KIND[c.kind] ?? c.kind)}${owner && c.requester ? `<div class="muted small">${esc(c.requester)}</div>` : ""}</td>
-				<td><strong>${esc(c.cn)}</strong>${owner && c.email ? `<div class="muted small">${esc(c.email)}</div>` : ""}</td>
-				<td class="small">${esc(c.ou || "–")}</td>
-				<td class="small mono">${esc(c.san || "–")}</td>
-				<td><span class="badge status-${esc(c.status)}">${esc(STATUS[c.status] ?? c.status)}</span>${c.rejectReason ? `<div class="muted small">${esc(c.rejectReason)}</div>` : ""}</td>
-				<td class="small">${esc(c.status === "issued" ? formatDay(c.notAfter) : "–")}</td>
-				<td class="actions">${owner ? ownerActions(c) : certDownloads(c)}</td></tr>`,
-				)
-				.join("")}</tbody></table></div>`;
-		host.querySelectorAll("[data-dl]").forEach((b) =>
-			b.addEventListener("click", () => download(`${base}/certificates/${b.dataset.id}?format=${b.dataset.dl}`).catch((e) => alert(e.message))),
-		);
-		host.querySelectorAll("[data-act]").forEach((b) => b.addEventListener("click", () => onAction?.(b.dataset.act, Number(b.dataset.id))));
-	};
-	const certDownloads = (c) =>
-		c.status === "issued"
-			? `<button class="secondary" data-dl="pem" data-id="${c.id}">.pem</button><button class="secondary" data-dl="chain" data-id="${c.id}">Kette</button><button class="secondary" data-dl="fullchain" data-id="${c.id}">+ Root</button><button class="secondary" data-dl="der" data-id="${c.id}">DER</button>`
-			: "";
-	const ownerActions = (c) =>
-		[
-			c.status !== "issued" ? `<button data-act="review" data-id="${c.id}">Prüfen</button>` : `<button class="secondary" data-dl="chain" data-id="${c.id}">Kette</button>`,
-			`<button class="danger secondary" data-act="delete" data-id="${c.id}">Löschen</button>`,
-		].join("");
-
 	const refreshPublic = async () => {
 		data = await call(base);
-		renderTable(data.certificates, root.querySelector("#certTable"));
+		renderCertTable(root.querySelector("#certTable"), data.certificates, { base });
 	};
-	renderTable(data.certificates, root.querySelector("#certTable"));
+	renderCertTable(root.querySelector("#certTable"), data.certificates, { base });
 
 	// ---- Anfrage-Formulare
 	const quickForm = root.querySelector("#quickForm");
@@ -190,172 +151,6 @@ export async function renderCa(root, token) {
 		}
 		captchas.csr.reload();
 	});
-
-	// ---- Inhaber-Bereich
-	const ownerDetails = root.querySelector("#ownerDetails");
-	let ownerToken = sessionStorage.getItem(ownerKey(token)) ?? "";
-	async function fetchOwner(path, { method = "GET", body } = {}) {
-		const res = await fetch(`${base}/owner${path}`, {
-			method,
-			headers: { Authorization: `Bearer ${ownerToken}`, ...(body ? { "Content-Type": "application/json" } : {}) },
-			body: body ? JSON.stringify(body) : undefined,
-		});
-		const json = await res.json().catch(() => null);
-		if (!res.ok) throw Object.assign(new Error(json?.error ?? `Fehler ${res.status}`), { status: res.status });
-		return json;
-	}
-
-	const renderOwnerLocked = (message = "") => {
-		root.querySelector("#ownerContent").innerHTML = `
-			<form id="unlock" class="narrow-form" style="margin-top:12px" autocomplete="off">
-				<label>Abruf-Code der Zwischenzertifizierungsstelle
-					<input name="code" required placeholder="z. B. K7QM-4TXD-9WPB-2HNC" autocomplete="off" autocapitalize="characters" />
-				</label>
-				<div data-captcha></div>
-				<p class="error" data-error>${esc(message)}</p>
-				<button type="submit">Entsperren</button>
-			</form>
-			<p class="muted small">Den Abruf-Code hast du beim Beantragen deines Zwischenzertifikats erhalten. Er schützt diesen Bereich – bitte nicht an die Klasse weitergeben, nur die Adresse dieser Seite.</p>`;
-		const captcha = mountCaptcha(root.querySelector("#unlock [data-captcha]"));
-		root.querySelector("#unlock").addEventListener("submit", async (e) => {
-			e.preventDefault();
-			const f = e.currentTarget;
-			try {
-				const res = await call(`${base}/owner/login`, { method: "POST", body: { code: f.code.value, ...captcha.values() } });
-				ownerToken = res.ownerToken;
-				loadOwner();
-			} catch (err) {
-				f.querySelector("[data-error]").textContent = err.message;
-				captcha.reload();
-			}
-		});
-	};
-
-	async function loadOwner() {
-		let state;
-		try {
-			state = await fetchOwner("");
-		} catch (e) {
-			sessionStorage.removeItem(ownerKey(token));
-			ownerToken = "";
-			return renderOwnerLocked(e.status === 401 ? "Die Inhaber-Sitzung ist abgelaufen oder ungültig. Bitte erneut mit Abruf-Code und Captcha anmelden." : e.message);
-		}
-		sessionStorage.setItem(ownerKey(token), ownerToken);
-		const host = root.querySelector("#ownerContent");
-		host.innerHTML = `
-			<h3 style="margin-top:16px">Anfragen</h3>
-			<div id="ownerTable"></div>
-			<div id="reviewBox"></div>
-			<h3 style="margin-top:24px">Schlüssel der Zwischenzertifizierungsstelle</h3>
-			<p>${state.keyStored ? "✅ <strong>Schlüssel ist hinterlegt</strong> – Freigaben werden sofort ausgestellt." : "Kein Schlüssel hinterlegt – bei jeder Freigabe muss der Private Key hochgeladen werden."}</p>
-			<p class="notice">Ein hinterlegter Schlüssel wird verschlüsselt gespeichert, kann aber technisch von den Betreibern dieses Dienstes entschlüsselt werden. Wer das nicht möchte, lädt ihn bei jeder Freigabe erneut hoch – er wird dabei nur im Arbeitsspeicher verwendet und nicht gespeichert.</p>
-			${
-				state.keyStored
-					? `<button class="danger secondary" id="keyDelete">Hinterlegten Schlüssel löschen</button>`
-					: `<form id="keyForm"><label>Private Key (PKCS#8, unverschlüsselt)<textarea name="key" rows="5" spellcheck="false" placeholder="-----BEGIN PRIVATE KEY-----" required></textarea></label>
-					<p class="error" data-error></p><button type="submit">Schlüssel dauerhaft hinterlegen</button></form>`
-			}`;
-
-		const act = async (what, id) => {
-			if (what === "delete") {
-				if (confirm("Diese Anfrage löschen?")) {
-					await fetchOwner(`/requests/${id}`, { method: "DELETE" }).catch((e) => alert(e.message));
-					await loadOwner();
-					await refreshPublic();
-				}
-				return;
-			}
-			const req = state.requests.find((r) => r.id === id);
-			openReview(req, state);
-		};
-		renderTable(state.requests, host.querySelector("#ownerTable"), { owner: true, onAction: act });
-
-		host.querySelector("#keyDelete")?.addEventListener("click", async () => {
-			if (!confirm("Hinterlegten Schlüssel löschen?")) return;
-			await fetchOwner("/key", { method: "DELETE" }).catch((e) => alert(e.message));
-			loadOwner();
-		});
-		host.querySelector("#keyForm")?.addEventListener("submit", async (e) => {
-			e.preventDefault();
-			const f = e.currentTarget;
-			try {
-				await fetchOwner("/key", { method: "PUT", body: { keyPem: f.key.value } });
-				loadOwner();
-			} catch (err) {
-				f.querySelector("[data-error]").textContent = err.message;
-			}
-		});
-	}
-
-	function openReview(req, state) {
-		const box = root.querySelector("#reviewBox");
-		box.innerHTML = `
-			<form class="card" id="reviewForm">
-				<h3>Anfrage prüfen: ${esc(req.cn)}</h3>
-				<p class="notice">Vor der Freigabe prüfen, ob die Anfrage berechtigt ist (${esc(KIND[req.kind])}${req.requester ? ` von ${esc(req.requester)}` : ""}). Die SAN-Einträge müssen innerhalb der erlaubten Domains liegen.</p>
-				<h4>Antragsteller (Pflicht)</h4>
-				<div class="grid">
-					<label>Common Name (CN)<input name="cn" required maxlength="64" value="${esc(req.cn)}" /></label>
-					<label>Abteilung / Klasse (OU) *<input name="ou" required maxlength="64" value="${esc(req.ou)}" /></label>
-					<label>E-Mail (E) *<input name="email" type="email" required maxlength="120" value="${esc(req.email)}" /></label>
-				</div>
-				<h4>Organisation &amp; Standort (aus dem Zwischenzertifikat, anpassbar)</h4>
-				<div class="grid">
-					<label>Organisation (O)<input name="O" maxlength="64" value="${esc(state.defaults.O)}" /></label>
-					<label>Land (C)<input name="C" maxlength="2" value="${esc(state.defaults.C)}" /></label>
-					<label>Bundesland (ST)<input name="ST" maxlength="64" value="${esc(state.defaults.ST)}" /></label>
-					<label>Ort (L)<input name="L" maxlength="64" value="${esc(state.defaults.L)}" /></label>
-				</div>
-				<h4>Laufzeit</h4>
-				<div class="grid">
-					<label>Gültigkeit (Tage, max. ${state.maxValidityDays})<input name="validityDays" type="number" min="1" max="${state.maxValidityDays}" value="${state.defaultValidityDays}" required /></label>
-				</div>
-				<p class="muted small">Die Laufzeit kann nicht länger sein als die Restlaufzeit der Zwischenzertifizierungsstelle (${state.maxValidityDays} Tage${state.maxValidityDays >= 825 ? ", Maximum" : ""}).</p>
-				<label>SAN (kommagetrennt)<input name="san" value="${esc(req.san)}" /></label>
-				${state.keyStored ? "" : `<label>Private Key der Zwischenzertifizierungsstelle (PKCS#8) – wird nicht gespeichert<textarea name="key" rows="4" spellcheck="false" required placeholder="-----BEGIN PRIVATE KEY-----"></textarea></label>`}
-				<label>Ablehnungsgrund (nur beim Ablehnen)<input name="reason" maxlength="300" /></label>
-				<p class="error" data-error></p>
-				<div class="actions"><button type="submit" data-do="approve">Freigeben &amp; ausstellen</button><button type="button" class="danger" data-do="reject">Ablehnen</button><button type="button" class="secondary" data-do="close">Schließen</button></div>
-			</form>`;
-		box.scrollIntoView({ behavior: "smooth" });
-		const form = box.querySelector("#reviewForm");
-		const fail = (e) => (form.querySelector("[data-error]").textContent = e.message);
-		form.addEventListener("submit", async (e) => {
-			e.preventDefault();
-			try {
-				const res = await fetchOwner(`/requests/${req.id}/approve`, {
-					method: "POST",
-					body: {
-						cn: form.cn.value, ou: form.ou.value, email: form.email.value, san: form.san.value, validityDays: Number(form.validityDays.value),
-						subject: { O: form.O.value, C: form.C.value, ST: form.ST.value, L: form.L.value },
-						...(form.key ? { keyPem: form.key.value } : {}),
-					},
-				});
-				await loadOwner();
-				await refreshPublic();
-			} catch (err) {
-				fail(err);
-			}
-		});
-		form.querySelector('[data-do="reject"]').addEventListener("click", async () => {
-			try {
-				await fetchOwner(`/requests/${req.id}/reject`, { method: "POST", body: { reason: form.reason.value } });
-				await loadOwner();
-				await refreshPublic();
-			} catch (err) {
-				fail(err);
-			}
-		});
-		form.querySelector('[data-do="close"]').addEventListener("click", () => (box.innerHTML = ""));
-	}
-
-	if (ownerToken) {
-		ownerDetails.open = true;
-		loadOwner();
-	} else {
-		renderOwnerLocked();
-		ownerDetails.open = location.hash === "#owner";
-	}
 }
 
 // Bestätigungsmaske des Quick-Zertifikats: Der Private Key liegt nur hier im Speicher.
