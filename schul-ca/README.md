@@ -5,14 +5,20 @@ Cloudflare Worker + D1, gleicher Aufbau wie `pausen-checkin`.
 **Öffentlich** (`/`, ohne Login): Mindestanforderungen an den CSR und Download der Stammzertifikate
 (nur das Zertifikat).
 
-**Zwei getrennte Zugänge auf der Startseite:**
+**Jede Funktion hat ihre eigene Seite und ihre eigene Anmeldung:**
 
-1. *Neues Zwischenzertifikat beantragen* – **Schulpasswort + Captcha**, danach CSR-Upload (Auswahl
-   des Stammzertifikats, Kontaktangaben) und einmalige Anzeige des Abruf-Codes.
-2. *Status prüfen, Zertifikat abrufen & verwalten* – **Abruf-Code + Captcha**, ohne Schulpasswort.
-   Daraus entsteht eine kurzlebige **Abruf-Sitzung** (2 h, an genau diesen CSR gebunden): Download
-   des Zertifikats, Verwaltung aktivieren/deaktivieren, Zugang zum Inhaber-Bereich der Klassen-Seite.
-   Das Schulpasswort wird dafür nicht benötigt, der Abruf-Code ersetzt es nicht beim Beantragen.
+| Adresse | Inhalt | Zugang |
+|---|---|---|
+| `/` | Startseite: Mindestanforderungen, Stammzertifikat-Download, zwei Einstiege | öffentlich |
+| `/beantragen` | Zwischenzertifikat beantragen (CSR, Kontaktangaben), zeigt einmalig den Abruf-Code | Schulpasswort + Captcha |
+| `/abruf` | Status prüfen, Zertifikat abrufen, Verwaltung aktivieren | Abruf-Code + Captcha |
+| `/ca/<Token>` | Klassen-Seite: Zwischenzertifikat, Tabelle der Zertifikate, Quick-Zertifikat/CSR einreichen | öffentlich (URL), Captcha beim Einreichen |
+| `/ca/<Token>/verwalten` | Inhaber-Seite: Anfragen freigeben/ablehnen, Schlüssel der Zwischen-CA | Abruf-Code + Captcha |
+| `/admin` | Administration | Admin-Passwort |
+
+Der Abruf mit Code + Captcha erzeugt eine kurzlebige **Abruf-Sitzung** (2 h, an genau diesen CSR
+gebunden): Download des Zertifikats, Verwaltung aktivieren/deaktivieren und Zugang zur
+Inhaber-Seite. Das Schulpasswort wird dafür nicht benötigt und ersetzt den Abruf-Code nicht.
 
 **Admin** (`/admin`): CSR-Queue (freigeben mit Template / ablehnen / Zertifikat erzeugen),
 Stammzertifikate (nur Import von Zertifikat + Key, die Root wird offline erzeugt; aktiv/inaktiv), Templates, Schüler-/Admin-Passwort
@@ -48,12 +54,12 @@ Unter dem Abruf-Code eines ausgestellten Zwischenzertifikats gibt es das Häkche
 Zwischenzertifizierungsstelle hier verwalten“. Es legt die Ressource `/ca/<Token>` an (128 Bit
 Zufall, ohne Login nutzbar), die der Inhaber an die Klasse weitergibt.
 
-* **Klassen-Seite (öffentlich, per URL):** Zwischenzertifikat herunterladen (PEM/DER/Kette), Tabelle
+* **Klassen-Seite `/ca/<Token>` (öffentlich, per URL):** Zwischenzertifikat herunterladen (PEM/DER/Kette), Tabelle
   aller Anfragen und ausgestellten Zertifikate (Download PEM/Kette/Vollkette/DER), neue Anfrage per
   eigenem CSR oder **Quick-Zertifikat** (CN, OU, SAN, E → Schlüssel und CSR werden serverseitig
   erzeugt; der Private Key steht nur in der Antwort, wird nicht gespeichert und ist nur einmal
   herunterladbar). Einreichen erfordert Captcha, Rate-Limit und ist je Zwischen-CA auf 300 Anfragen begrenzt.
-* **Inhaber-Bereich (Abruf-Code + Captcha bzw. Abruf-Sitzung):** Anfragen prüfen, Subject/SAN/Laufzeit anpassen, freigeben
+* **Inhaber-Seite `/ca/<Token>/verwalten` (Abruf-Code + Captcha bzw. Abruf-Sitzung):** Anfragen prüfen, Subject/SAN/Laufzeit anpassen, freigeben
   (= ausstellen) oder mit Grund ablehnen. Den Schlüssel der Zwischen-CA kann der Inhaber
   **dauerhaft hinterlegen** (AES-256-GCM, eigener abgeleiteter Schlüssel `ca-key`) oder bei jeder
   Freigabe **neu hochladen** (wird nur im Request verwendet). Ein hinterlegter Schlüssel ist für die

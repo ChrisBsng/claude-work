@@ -165,3 +165,14 @@ table.sub { box-shadow: none; font-size: 0.85rem; }
 .card-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 8px; }
 .card-head h2 { margin: 0; }
 .narrow-form { max-width: 420px; }
+
+/* ── Navigation & Einstiege ── */
+.crumbs { font-family: var(--font-mono); font-size: 0.75rem; margin: 0 0 4px; }
+.crumbs a { color: var(--color-muted); }
+.entry-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; margin: 16px 0; }
+.entry-grid .card { margin: 0; }
+.entry { display: flex; flex-direction: column; }
+.entry h2 { margin-bottom: 8px; }
+.entry .button-link { margin-top: auto; align-self: flex-start; }
+.owner-link { text-align: center; margin: 8px 0 0; }
+.owner-link a { color: var(--color-muted); }
