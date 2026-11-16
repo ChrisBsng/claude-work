@@ -112,11 +112,11 @@ async function renderCsrs(panel, root) {
 		${
 			csrs.length
 				? `<table>
-			<thead><tr><th>Klasse</th><th>Subject (CSR)</th><th>Key</th><th>Stamm-CA</th><th>Eingereicht</th><th>Status</th><th></th></tr></thead>
+			<thead><tr><th>Klasse</th><th>Kontakt</th><th>Subject (CSR)</th><th>Key</th><th>Stamm-CA</th><th>Eingereicht</th><th>Status</th><th></th></tr></thead>
 			<tbody>${csrs
 				.map(
 					(c) => `<tr>
-				<td><strong>${esc(c.label)}</strong></td><td class="small">${esc(c.subject)}</td><td class="small">${esc(c.keyInfo)}</td>
+				<td><strong>${esc(c.label)}</strong></td><td class="small">${esc(c.contactPerson || "–")}<br><span class="muted">${esc(contactLabel(c))}</span></td><td class="small">${esc(c.subject)}</td><td class="small">${esc(c.keyInfo)}</td>
 				<td class="small">${esc(c.rootName)}</td><td class="small">${esc(formatDate(c.submittedAt))}</td>
 				<td><span class="badge status-${esc(c.status)}">${esc(STATUS_LABELS[c.status])}</span></td>
 				<td><button class="secondary" data-open="${c.id}">Öffnen</button></td></tr>`,
@@ -139,6 +139,11 @@ async function renderCsrs(panel, root) {
 	);
 }
 
+const CONTACT_METHOD_LABELS = { email: "E-Mail", teams: "Teams", phone: "Telefon" };
+function contactLabel(c) {
+	return c.contactMethod ? `${CONTACT_METHOD_LABELS[c.contactMethod] ?? c.contactMethod}: ${c.contactDetail}` : "";
+}
+
 const SUBJECT_FIELDS = [
 	["CN", "Common Name (CN)"], ["O", "Organisation (O)"], ["OU", "Abteilung (OU)"], ["C", "Land (C)"], ["ST", "Bundesland (ST)"], ["L", "Ort (L)"],
 ];
@@ -153,6 +158,8 @@ function renderCsrDetail(box, csr, templates, root) {
 		<div class="card detail">
 			<h2>${esc(csr.label)} <span class="badge status-${esc(csr.status)}">${esc(STATUS_LABELS[csr.status])}</span></h2>
 			<dl>
+				<dt>Kontaktperson</dt><dd>${esc(csr.contactPerson || "– (vor Einführung der Pflichtangabe eingereicht)")}</dd>
+				${csr.contactMethod ? `<dt>Kontaktweg</dt><dd>${esc(contactLabel(csr))}</dd>` : ""}
 				<dt>Subject im CSR</dt><dd>${esc(csr.subject)}</dd>
 				<dt>Schlüssel</dt><dd>${esc(csr.keyInfo)}</dd>
 				<dt>Stammzertifikat</dt><dd>${esc(csr.rootName)}</dd>
@@ -166,6 +173,7 @@ function renderCsrDetail(box, csr, templates, root) {
 				editable
 					? `<form id="approve">
 				<h3>Freigabe</h3>
+				<p class="notice">Vor der Freigabe die Anfrage über den angegebenen Kontaktweg verifizieren.</p>
 				<label>Template
 					<select name="templateId" required>
 						<option value="">– wählen –</option>
