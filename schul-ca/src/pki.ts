@@ -551,3 +551,11 @@ export function remainingDays(certPem: string): number {
 	const cert = new x509.X509Certificate(certPem);
 	return Math.max(0, Math.floor((cert.notAfter.getTime() - Date.now()) / 86_400_000));
 }
+
+// Fester Text für die OU der Endzertifikate: die OU des Zwischenzertifikats, ersatzweise dessen CN
+// (also der Klassenname).
+export function fixedOuOfCert(certPem: string): string {
+	const cert = new x509.X509Certificate(certPem);
+	const f = (n: string) => (cert.subjectName.getField(n)[0] as string | undefined) ?? "";
+	return (f("OU") || f("CN")).slice(0, 64);
+}

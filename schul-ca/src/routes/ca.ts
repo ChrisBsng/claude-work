@@ -10,6 +10,7 @@ import {
 	certPemToDer,
 	generateQuickRequest,
 	issueLeaf,
+	fixedOuOfCert,
 	locationFieldsOfCert,
 	MAX_LEAF_VALIDITY_DAYS,
 	remainingDays,
@@ -122,6 +123,7 @@ caRouter.get("/:token", async (request: IRequest, env: Env) => {
 			notAfter: ca.not_after,
 			rootName: ca.root_name,
 			permittedDns: permittedDnsOfCert(ca.ca_cert_pem),
+			fixedOu: fixedOuOfCert(ca.ca_cert_pem),
 			maxValidityDays: validityLimits(ca).maxValidityDays,
 			keyStored: Boolean(ca.key_encrypted),
 			certificates: results.map((r) => serializeLeaf(r)),
@@ -166,13 +168,12 @@ async function guardPublicSubmit(request: IRequest, env: Env, ca: CaRow, body: {
 const cleanText = (v: unknown, max: number) => (typeof v === "string" ? v.trim().slice(0, max) : "");
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-// OU und E-Mail sind Pflicht, damit der Inhaber die Antragsteller identifizieren kann.
-function requireIdentity(ouRaw: unknown, emailRaw: unknown): { error: string } | { ou: string; email: string } {
-	const ou = cleanText(ouRaw, 64);
+// Die E-Mail-Adresse ist Pflicht, damit der Antragsteller identifizierbar ist. Die OU wird nicht
+// abgefragt, sondern fest aus dem Zwischenzertifikat übernommen.
+function requireEmail(emailRaw: unknown): { error: string } | { email: string } {
 	const email = cleanText(emailRaw, 120);
-	if (!ou) return { error: "Bitte die Abteilung/Klasse (OU) angeben – sie dient zur Identifizierung des Antragstellers." };
 	if (!email || !EMAIL_RE.test(email)) return { error: "Bitte eine gültige E-Mail-Adresse angeben – sie dient zur Identifizierung des Antragstellers." };
-	return { ou, email };
+	return { email };
 }
 
 // Zulässige Laufzeit für Endzertifikate: höchstens 825 Tage, nie länger als die Restlaufzeit der Zwischen-CA.
@@ -185,10 +186,10 @@ function validityLimits(ca: CaRow) {
 caRouter.post("/:token/requests", async (request: IRequest, env: Env) => {
 	const ca = await loadCa(env, request.params.token);
 	if (!ca) return notFound();
-	const body = await readJson<{ captchaToken?: string; captchaAnswer?: string; requester?: string; csrPem?: string; ou?: string; email?: string }>(request);
+	const body = await readJson<{ captchaToken?: string; captchaAnswer?: string; requester?: string; csrPem?: string; email?: string }>(request);
 	const denied = await guardPublicSubmit(request, env, ca, body);
 	if (denied) return denied;
-	const identity = requireIdentity(body?.ou, body?.email);
+	const identity = requireEmail(body?.email);
 	if ("error" in identity) return badRequest(identity.error);
 	const csrPem = body?.csrPem?.trim();
 	if (!csrPem) return badRequest("Bitte einen CSR einfügen oder hochladen.");
@@ -200,7 +201,7 @@ caRouter.post("/:token/requests", async (request: IRequest, env: Env) => {
 			`INSERT INTO leaf_requests (ca_id, kind, requester, csr_pem, key_info, subject_cn, subject_ou, subject_email, san)
 			 VALUES (?1, 'csr', ?2, ?3, ?4, ?5, ?6, ?7, ?8) RETURNING id`,
 		)
-			.bind(ca.id, cleanText(body?.requester, 80), csrPem, info.keyInfo, (info.cn ?? "").slice(0, 64), identity.ou, identity.email, sanToString(info.sans))
+			.bind(ca.id, cleanText(body?.requester, 80), csrPem, info.keyInfo, (info.cn ?? "").slice(0, 64), fixedOuOfCert(ca.ca_cert_pem), identity.email, sanToString(info.sans))
 			.first<{ id: number }>();
 		return Response.json({ id: row!.id, subject: info.subject }, { status: 201 });
 	} catch (e) {
@@ -214,14 +215,15 @@ caRouter.post("/:token/requests", async (request: IRequest, env: Env) => {
 caRouter.post("/:token/quick", async (request: IRequest, env: Env) => {
 	const ca = await loadCa(env, request.params.token);
 	if (!ca) return notFound();
-	const body = await readJson<{ captchaToken?: string; captchaAnswer?: string; requester?: string; cn?: string; ou?: string; san?: string; email?: string }>(request);
+	const body = await readJson<{ captchaToken?: string; captchaAnswer?: string; requester?: string; cn?: string; san?: string; email?: string }>(request);
 	const denied = await guardPublicSubmit(request, env, ca, body);
 	if (denied) return denied;
 	const cn = cleanText(body?.cn, 64);
 	if (!cn) return badRequest("Bitte den Common Name (CN) angeben, z. B. den Hostnamen.");
-	const identity = requireIdentity(body?.ou, body?.email);
+	const identity = requireEmail(body?.email);
 	if ("error" in identity) return badRequest(identity.error);
-	const { ou, email } = identity;
+	const { email } = identity;
+	const ou = fixedOuOfCert(ca.ca_cert_pem);
 	try {
 		const sans = parseSanList(body?.san);
 		if (!sans.length) return badRequest("Bitte mindestens einen SAN-Eintrag angeben (DNS-Name, IP oder E-Mail), z. B. den Hostnamen.");
@@ -253,7 +255,7 @@ caRouter.post("/:token/owner/login", async (request: IRequest, env: Env) => {
 	if (!(await verifyCaptcha(env, body?.captchaToken, body?.captchaAnswer))) return badRequest("Captcha falsch oder abgelaufen. Bitte ein neues lösen.");
 	const code = normalizeCode(body?.code);
 	if (!code || !constantTimeEqual(await hashCode(code), ca.code_hash)) return badRequest("Abruf-Code ungültig.", 401);
-	return Response.json({ ownerToken: await createPickupToken(env, ca.csr_id) });
+	return Response.json({ ownerToken: await createPickupToken(env, ca.csr_id, ca.code_hash) });
 });
 
 caRouter.get("/:token/owner", async (request: IRequest, env: Env) => {
@@ -265,7 +267,7 @@ caRouter.get("/:token/owner", async (request: IRequest, env: Env) => {
 	return Response.json({
 		keyStored: Boolean(ca.key_encrypted),
 		...validityLimits(ca),
-		defaults: locationFieldsOfCert(ca.ca_cert_pem), // C, ST, L, O aus dem Zwischenzertifikat
+		defaults: { ...locationFieldsOfCert(ca.ca_cert_pem), OU: fixedOuOfCert(ca.ca_cert_pem) }, // O, C, ST, L, OU aus dem Zwischenzertifikat
 		requests: results.map((r) => serializeLeaf(r, true)),
 	});
 });
@@ -321,9 +323,11 @@ caRouter.post("/:token/owner/requests/:id/approve", async (request: IRequest, en
 	}>(request);
 	const cn = cleanText(body?.cn, 64);
 	if (!cn) return badRequest("Common Name (CN) ist erforderlich.");
-	const identity = requireIdentity(body?.ou, body?.email);
+	const identity = requireEmail(body?.email);
 	if ("error" in identity) return badRequest(identity.error);
-	const { ou, email } = identity;
+	const { email } = identity;
+	// OU: fest aus dem Zwischenzertifikat; der Inhaber kann sie bei der Freigabe anpassen (leer = weglassen).
+	const ou = typeof body?.ou === "string" ? cleanText(body.ou, 64) : fixedOuOfCert(ca.ca_cert_pem);
 
 	// C/ST/L/O: Vorbelegung aus dem Zwischenzertifikat, vom Inhaber anpassbar (leer = weglassen).
 	const defaults = locationFieldsOfCert(ca.ca_cert_pem);
@@ -359,7 +363,7 @@ caRouter.post("/:token/owner/requests/:id/approve", async (request: IRequest, en
 			caCertPem: ca.ca_cert_pem,
 			caPkcs8: pkcs8,
 			csrPem: req.csr_pem,
-			subject: { C: loc.C || undefined, ST: loc.ST || undefined, L: loc.L || undefined, O: loc.O || undefined, OU: ou, CN: cn, E: email },
+			subject: { C: loc.C || undefined, ST: loc.ST || undefined, L: loc.L || undefined, O: loc.O || undefined, OU: ou || undefined, CN: cn, E: email },
 			sans,
 			validityDays,
 		});

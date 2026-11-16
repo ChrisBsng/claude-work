@@ -88,6 +88,15 @@ function handleError(e, root, panel) {
 	panel.innerHTML = `<p class="error">${esc(e.message)}</p>`;
 }
 
+async function copyToClipboard(text, button) {
+	try {
+		await navigator.clipboard.writeText(text);
+		button.textContent = "Kopiert!";
+	} catch {
+		// Zwischenablage nicht verfügbar – der Code steht als Text da.
+	}
+}
+
 const run = async (fn, root, rerender) => {
 	try {
 		await fn();
@@ -196,6 +205,27 @@ function renderCsrDetail(box, csr, templates, root) {
 				${csr.management ? `<dt>Verwaltung</dt><dd>aktiv · <a href="/ca/${esc(csr.management.token)}" target="_blank" rel="noopener">Klassen-Seite</a> · ${csr.management.requests} Anfragen · Schlüssel ${csr.management.keyStored ? "hinterlegt" : "nicht hinterlegt"}</dd>` : ""}
 				${csr.status === "issued" ? `<dt>Seriennummer</dt><dd class="mono small">${esc(csr.serialNumber)}</dd><dt>Gültig</dt><dd>${esc(formatDay(csr.notBefore))} – ${esc(formatDay(csr.notAfter))}</dd>` : ""}
 			</dl>
+			<div class="actions">
+				<button type="button" class="secondary" id="editContact">Kontakt bearbeiten</button>
+				<button type="button" class="secondary" id="resetCode">Abruf-Code zurücksetzen</button>
+			</div>
+			<form id="contactForm" class="card" hidden>
+				<h3>Kontakt bearbeiten</h3>
+				<label>Kontaktperson<input name="contactPerson" required minlength="2" maxlength="80" value="${esc(csr.contactPerson)}" /></label>
+				<div class="grid">
+					<label>Kontaktweg
+						<select name="contactMethod" required>
+							<option value="email" ${csr.contactMethod === "email" ? "selected" : ""}>E-Mail</option>
+							<option value="teams" ${csr.contactMethod === "teams" ? "selected" : ""}>Microsoft Teams</option>
+							<option value="phone" ${csr.contactMethod === "phone" ? "selected" : ""}>Telefon</option>
+						</select>
+					</label>
+					<label>Kontaktangabe<input name="contactDetail" required minlength="3" maxlength="120" value="${esc(csr.contactDetail)}" /></label>
+				</div>
+				<p class="error" data-error></p>
+				<div class="actions"><button type="submit">Speichern</button><button type="button" class="secondary" id="cancelContact">Abbrechen</button></div>
+			</form>
+			<div id="codeResult"></div>
 			<details><summary>CSR (PEM)</summary><pre>${esc(csr.csrPem)}</pre></details>
 			${
 				editable
@@ -234,7 +264,11 @@ function renderCsrDetail(box, csr, templates, root) {
 			</div>`
 					: ""
 			}
-			<div class="actions">${csr.management ? `<button class="secondary" id="unmanage">Verwaltung deaktivieren</button>` : ""}<button class="danger secondary" id="delete">CSR löschen</button></div>
+			<div class="danger-zone">
+				<h3>Löschen</h3>
+				<p class="muted small">${csr.status === "issued" ? "Löscht das Zwischenzertifikat" : "Löscht den CSR"} <strong>mit allen zugehörigen Daten dieser Klasse</strong>: Kontakt- und Abrufdaten${csr.management ? `, die Klassen-Seite, ${csr.management.requests} Anfragen/Zertifikate der Mitschüler und einen hinterlegten Schlüssel` : ""}. Das ausgestellte Zertifikat selbst bleibt kryptografisch gültig – es gibt keinen Widerruf.</p>
+				<div class="actions">${csr.management ? `<button class="secondary" id="unmanage">Nur Verwaltung deaktivieren</button>` : ""}<button class="danger" id="delete">${csr.status === "issued" ? "Zwischenzertifikat löschen…" : "CSR löschen…"}</button></div>
+			</div>
 		</div>`;
 	box.scrollIntoView({ behavior: "smooth" });
 
@@ -284,10 +318,61 @@ function renderCsrDetail(box, csr, templates, root) {
 			run(() => api(`/csrs/${csr.id}/management`, { method: "DELETE" }), root, rerender);
 		}
 	});
-	box.querySelector("#delete").addEventListener("click", () => {
-		if (confirm(`CSR „${csr.label}“ endgültig löschen? Das ausgestellte Zertifikat (falls vorhanden) bleibt gültig, ist aber nicht mehr abrufbar.`)) {
-			run(() => api(`/csrs/${csr.id}`, { method: "DELETE" }), root, rerender);
+	const form_contact = box.querySelector("#contactForm");
+	box.querySelector("#editContact").addEventListener("click", () => (form_contact.hidden = !form_contact.hidden));
+	box.querySelector("#cancelContact").addEventListener("click", () => (form_contact.hidden = true));
+	form_contact.addEventListener("submit", async (event) => {
+		event.preventDefault();
+		const f = event.currentTarget;
+		try {
+			await api(`/csrs/${csr.id}/contact`, {
+				method: "PATCH",
+				body: { contactPerson: f.contactPerson.value, contactMethod: f.contactMethod.value, contactDetail: f.contactDetail.value },
+			});
+			const { csr: fresh } = await api(`/csrs/${csr.id}`);
+			renderCsrDetail(box, fresh, templates, root);
+		} catch (e) {
+			if (e.status === 401) {
+				setToken(null);
+				return renderLogin(root);
+			}
+			f.querySelector("[data-error]").textContent = e.message;
 		}
+	});
+
+	box.querySelector("#resetCode").addEventListener("click", async () => {
+		if (!confirm(`Abruf-Code für „${csr.label}“ zurücksetzen?\n\nDer bisherige Code wird sofort ungültig, laufende Abruf-Sitzungen enden. Der neue Code wird nur jetzt einmal angezeigt.`)) return;
+		try {
+			const { code } = await api(`/csrs/${csr.id}/reset-code`, { method: "POST" });
+			const out = box.querySelector("#codeResult");
+			out.innerHTML = `
+				<div class="code-box">
+					<p><strong>Neuer Abruf-Code für ${esc(csr.label)}</strong> (nur jetzt sichtbar – bitte an den Inhaber weitergeben):</p>
+					<div class="code mono">${esc(code)}</div>
+					<p class="muted small">Der alte Code und alle laufenden Abruf-Sitzungen sind ungültig.</p>
+					<button type="button" class="secondary" id="copyNewCode">Code kopieren</button>
+				</div>`;
+			out.querySelector("#copyNewCode").addEventListener("click", (e) => copyToClipboard(code, e.target));
+		} catch (e) {
+			if (e.status === 401) {
+				setToken(null);
+				return renderLogin(root);
+			}
+			alert(e.message);
+		}
+	});
+
+	box.querySelector("#delete").addEventListener("click", () => {
+		const parts = [`„${csr.label}“ endgültig löschen?`, "", "Gelöscht werden:", `• ${csr.status === "issued" ? "das Zwischenzertifikat" : "der CSR"}, Kontakt- und Abrufdaten`];
+		if (csr.management) parts.push(`• die Klassen-Seite, ${csr.management.requests} Anfragen/Zertifikate der Mitschüler und ein hinterlegter Schlüssel`);
+		parts.push("", "Das ausgestellte Zertifikat bleibt kryptografisch gültig (es gibt keinen Widerruf).", "", "Zur Bestätigung den Klassennamen eingeben:");
+		const typed = prompt(parts.join("\n"));
+		if (typed === null) return;
+		if (typed.trim().toLowerCase() !== csr.label.trim().toLowerCase()) {
+			alert("Der Name stimmt nicht überein. Es wurde nichts gelöscht.");
+			return;
+		}
+		run(() => api(`/csrs/${csr.id}`, { method: "DELETE" }), root, rerender);
 	});
 }
 
