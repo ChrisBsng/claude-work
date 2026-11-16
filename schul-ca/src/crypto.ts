@@ -122,27 +122,32 @@ export async function fingerprintOf(value: string): Promise<string> {
 	return (await sha256Hex(`fp:${value}`)).slice(0, 16);
 }
 
-// ---- Verschlüsselung der Root-Keys ----------------------------------------
+// ---- Verschlüsselung gespeicherter Private Keys -----------------------------
+// Zweck "root-key" bleibt unverändert (bestehende Daten); "ca-key" für die
+// von Inhabern hinterlegten Zwischen-CA-Schlüssel (eigener Schlüssel + AAD).
 
-async function aesKey(master: string): Promise<CryptoKey> {
-	return hkdf(master, "aes:root-key-store", ["encrypt", "decrypt"], { name: "AES-GCM", length: 256 });
-}
+export type KeyPurpose = "root-key" | "ca-key";
+const PURPOSE_INFO: Record<KeyPurpose, { info: string; aad: string }> = {
+	"root-key": { info: "aes:root-key-store", aad: "schul-ca:root-key" },
+	"ca-key": { info: "aes:ca-key-store", aad: "schul-ca:ca-key" },
+};
 
-const AAD = new TextEncoder().encode("schul-ca:root-key");
+const aesKey = (master: string, purpose: KeyPurpose) => hkdf(master, PURPOSE_INFO[purpose].info, ["encrypt", "decrypt"], { name: "AES-GCM", length: 256 });
+const aadFor = (purpose: KeyPurpose) => new TextEncoder().encode(PURPOSE_INFO[purpose].aad);
 
 // Format: v1:<iv>:<ciphertext> (Base64URL)
-export async function encryptSecret(master: string, plaintext: Uint8Array): Promise<string> {
+export async function encryptSecret(master: string, plaintext: Uint8Array, purpose: KeyPurpose = "root-key"): Promise<string> {
 	const iv = crypto.getRandomValues(new Uint8Array(12));
-	const ct = await crypto.subtle.encrypt({ name: "AES-GCM", iv, additionalData: AAD }, await aesKey(master), plaintext as BufferSource);
+	const ct = await crypto.subtle.encrypt({ name: "AES-GCM", iv, additionalData: aadFor(purpose) }, await aesKey(master, purpose), plaintext as BufferSource);
 	return `v1:${base64UrlEncode(iv)}:${base64UrlEncode(new Uint8Array(ct))}`;
 }
 
-export async function decryptSecret(master: string, stored: string): Promise<Uint8Array> {
+export async function decryptSecret(master: string, stored: string, purpose: KeyPurpose = "root-key"): Promise<Uint8Array> {
 	const [version, ivB64, ctB64] = stored.split(":");
 	if (version !== "v1" || !ivB64 || !ctB64) throw new Error("Unbekanntes Key-Format");
 	const pt = await crypto.subtle.decrypt(
-		{ name: "AES-GCM", iv: base64UrlDecode(ivB64) as BufferSource, additionalData: AAD },
-		await aesKey(master),
+		{ name: "AES-GCM", iv: base64UrlDecode(ivB64) as BufferSource, additionalData: aadFor(purpose) },
+		await aesKey(master, purpose),
 		base64UrlDecode(ctB64) as BufferSource,
 	);
 	return new Uint8Array(pt);

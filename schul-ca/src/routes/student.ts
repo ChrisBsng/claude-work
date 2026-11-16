@@ -1,10 +1,12 @@
 import { Router, type IRequest } from "itty-router";
 import { checkPassword, getSetting, issueToken, requireStudent } from "../auth";
 import { createCaptcha, verifyCaptcha } from "../captcha";
-import { sha256Hex } from "../crypto";
+import { generateCode, hashCode, normalizeCode } from "../codes";
 import type { Env } from "../env";
 import { badRequest, fileResponse, MIME, readJson, safeName } from "../http";
 import { analyzeCsr, certPemToDer, PkiError } from "../pki";
+import { randomToken } from "../crypto";
+import { createPickupToken, pickupCsrId } from "../pickup";
 import { clientIp, rateLimitOk } from "../rateLimit";
 
 export const studentRouter = Router({ base: "/api/student" });
@@ -26,20 +28,6 @@ function validateContact(person: unknown, method: unknown, detail: unknown): { e
 	if (method === "phone" && !/^\+?[0-9 ()\/.-]{6,30}$/.test(d)) return { error: "Bitte eine gültige Telefonnummer angeben." };
 	return { person: p, method: method as ContactMethod, detail: d };
 }
-
-// Abruf-Code: 16 Zeichen aus eindeutigem Alphabet (80 Bit), z. B. K7QM-4TXD-9WPB-2HNC
-const CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-function generateCode(): string {
-	const bytes = crypto.getRandomValues(new Uint8Array(16));
-	const chars = [...bytes].map((b) => CODE_ALPHABET[b % CODE_ALPHABET.length]);
-	return [0, 4, 8, 12].map((i) => chars.slice(i, i + 4).join("")).join("-");
-}
-function normalizeCode(input: unknown): string | null {
-	if (typeof input !== "string") return null;
-	const c = input.toUpperCase().replace(/[^A-Z0-9]/g, "");
-	return c.length === 16 ? c : null;
-}
-const hashCode = (normalized: string) => sha256Hex(`csr-code:${normalized}`);
 
 // Öffentlich: Stammzertifikate (nur das Zertifikat, nie der Key) und Passworthinweis.
 // Öffentlich: Passworthinweis + ob die Schüleroberfläche überhaupt freigeschaltet ist.
@@ -133,12 +121,13 @@ studentRouter.post("/csrs", requireStudent, async (request: IRequest, env: Env) 
 	await env.DB.prepare(
 		"INSERT INTO csrs (root_ca_id, label, csr_pem, csr_subject, key_info, code_hash, contact_person, contact_method, contact_detail) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
 	)
-		.bind(root.id, label, csrPem, info.subject, info.keyInfo, await hashCode(code.replace(/-/g, "")), contact.person, contact.method, contact.detail)
+		.bind(root.id, label, csrPem, info.subject, info.keyInfo, await hashCode(normalizeCode(code)!), contact.person, contact.method, contact.detail)
 		.run();
 	return Response.json({ code, subject: info.subject, keyInfo: info.keyInfo }, { status: 201 });
 });
 
 interface CsrLookupRow {
+	id: number;
 	label: string;
 	csr_subject: string;
 	key_info: string;
@@ -152,27 +141,42 @@ interface CsrLookupRow {
 	root_cert_pem: string;
 }
 
-async function lookupByCode(request: IRequest, env: Env, codeInput: unknown): Promise<CsrLookupRow | Response> {
+const CSR_LOOKUP_SQL = `SELECT c.id, c.label, c.csr_subject, c.key_info, c.status, c.reject_reason, c.cert_pem, c.not_before, c.not_after, c.submitted_at,
+		        r.name AS root_name, r.cert_pem AS root_cert_pem
+		 FROM csrs c JOIN root_cas r ON r.id = c.root_ca_id`;
+
+// Abruf mit Code + Captcha (kein Schülerpasswort nötig).
+async function lookupByCode(request: IRequest, env: Env, body: { code?: string; captchaToken?: string; captchaAnswer?: string } | null): Promise<CsrLookupRow | Response> {
 	if (!(await rateLimitOk(env, `csr-lookup:${clientIp(request)}`, 30, 900))) {
 		return badRequest("Zu viele Abrufe. Bitte in einigen Minuten erneut versuchen.", 429);
 	}
-	const code = normalizeCode(codeInput);
+	if (!(await verifyCaptcha(env, body?.captchaToken, body?.captchaAnswer))) {
+		return badRequest("Captcha falsch oder abgelaufen. Bitte ein neues lösen.", 400);
+	}
+	const code = normalizeCode(body?.code);
 	if (!code) return badRequest("Ungültiger Abruf-Code (16 Zeichen, z. B. K7QM-4TXD-9WPB-2HNC).");
-	const row = await env.DB.prepare(
-		`SELECT c.label, c.csr_subject, c.key_info, c.status, c.reject_reason, c.cert_pem, c.not_before, c.not_after, c.submitted_at,
-		        r.name AS root_name, r.cert_pem AS root_cert_pem
-		 FROM csrs c JOIN root_cas r ON r.id = c.root_ca_id WHERE c.code_hash = ?1`,
-	)
-		.bind(await hashCode(code))
-		.first<CsrLookupRow>();
+	const row = await env.DB.prepare(`${CSR_LOOKUP_SQL} WHERE c.code_hash = ?1`).bind(await hashCode(code)).first<CsrLookupRow>();
 	return row ?? badRequest("Zu diesem Code wurde nichts gefunden.", 404);
 }
 
-studentRouter.post("/csrs/lookup", requireStudent, async (request: IRequest, env: Env) => {
-	const body = await readJson<{ code?: string }>(request);
-	const row = await lookupByCode(request, env, body?.code);
+// Folgeaktionen mit der Abruf-Sitzung (Token aus dem Abruf).
+async function rowFromPickup(request: IRequest, env: Env): Promise<CsrLookupRow | Response> {
+	const csrId = await pickupCsrId(env, request);
+	if (csrId === null) return badRequest("Abruf-Sitzung abgelaufen. Bitte den Abruf-Code erneut eingeben.", 401);
+	const row = await env.DB.prepare(`${CSR_LOOKUP_SQL} WHERE c.id = ?1`).bind(csrId).first<CsrLookupRow>();
+	return row ?? badRequest("Nicht gefunden.", 404);
+}
+
+studentRouter.post("/csrs/lookup", async (request: IRequest, env: Env) => {
+	const body = await readJson<{ code?: string; captchaToken?: string; captchaAnswer?: string }>(request);
+	const row = await lookupByCode(request, env, body);
 	if (row instanceof Response) return row;
+	const managed = await env.DB.prepare("SELECT public_token, key_encrypted IS NOT NULL AS has_key FROM ca_resources WHERE csr_id = ?1")
+		.bind(row.id)
+		.first<{ public_token: string; has_key: number }>();
 	return Response.json({
+		pickupToken: await createPickupToken(env, row.id),
+		management: row.status === "issued" ? { enabled: Boolean(managed), token: managed?.public_token ?? null, keyStored: Boolean(managed?.has_key) } : null,
 		label: row.label,
 		subject: row.csr_subject,
 		keyInfo: row.key_info,
@@ -185,10 +189,10 @@ studentRouter.post("/csrs/lookup", requireStudent, async (request: IRequest, env
 	});
 });
 
-studentRouter.post("/csrs/certificate", requireStudent, async (request: IRequest, env: Env) => {
-	const body = await readJson<{ code?: string; format?: string }>(request);
-	const row = await lookupByCode(request, env, body?.code);
+studentRouter.post("/csrs/certificate", async (request: IRequest, env: Env) => {
+	const row = await rowFromPickup(request, env);
 	if (row instanceof Response) return row;
+	const body = await readJson<{ format?: string }>(request);
 	if (row.status !== "issued" || !row.cert_pem) return badRequest("Das Zertifikat ist noch nicht ausgestellt.", 409);
 	const base = safeName(row.label);
 	switch (body?.format) {
@@ -201,3 +205,22 @@ studentRouter.post("/csrs/certificate", requireStudent, async (request: IRequest
 	}
 });
 
+// "Ich möchte die Zwischenzertifizierungsstelle hier verwalten": legt die eigene
+// Ressource (öffentliche Klassen-URL) an bzw. entfernt sie samt Anfragen und
+// hinterlegtem Schlüssel wieder.
+studentRouter.post("/csrs/manage", async (request: IRequest, env: Env) => {
+	const row = await rowFromPickup(request, env);
+	if (row instanceof Response) return row;
+	const body = await readJson<{ enable?: boolean }>(request);
+	if (row.status !== "issued") return badRequest("Die Verwaltung ist erst nach Ausstellung des Zwischenzertifikats möglich.", 409);
+
+	if (body?.enable === false) {
+		await env.DB.prepare("DELETE FROM ca_resources WHERE csr_id = ?1").bind(row.id).run();
+		return Response.json({ enabled: false, token: null });
+	}
+	const existing = await env.DB.prepare("SELECT public_token FROM ca_resources WHERE csr_id = ?1").bind(row.id).first<{ public_token: string }>();
+	if (existing) return Response.json({ enabled: true, token: existing.public_token });
+	const token = randomToken(16);
+	await env.DB.prepare("INSERT INTO ca_resources (csr_id, public_token) VALUES (?1, ?2)").bind(row.id, token).run();
+	return Response.json({ enabled: true, token }, { status: 201 });
+});

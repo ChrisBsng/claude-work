@@ -5,8 +5,14 @@ Cloudflare Worker + D1, gleicher Aufbau wie `pausen-checkin`.
 **Öffentlich** (`/`, ohne Login): Mindestanforderungen an den CSR und Download der Stammzertifikate
 (nur das Zertifikat).
 
-**Schüler** (nach Schulpasswort + Captcha): CSR hochladen (Auswahl des Stammzertifikats) →
-einmalig angezeigter Abruf-Code → Status/Ablehnungsgrund prüfen und Zertifikat bzw. Kette herunterladen.
+**Zwei getrennte Zugänge auf der Startseite:**
+
+1. *Neues Zwischenzertifikat beantragen* – **Schulpasswort + Captcha**, danach CSR-Upload (Auswahl
+   des Stammzertifikats, Kontaktangaben) und einmalige Anzeige des Abruf-Codes.
+2. *Status prüfen, Zertifikat abrufen & verwalten* – **Abruf-Code + Captcha**, ohne Schulpasswort.
+   Daraus entsteht eine kurzlebige **Abruf-Sitzung** (2 h, an genau diesen CSR gebunden): Download
+   des Zertifikats, Verwaltung aktivieren/deaktivieren, Zugang zum Inhaber-Bereich der Klassen-Seite.
+   Das Schulpasswort wird dafür nicht benötigt, der Abruf-Code ersetzt es nicht beim Beantragen.
 
 **Admin** (`/admin`): CSR-Queue (freigeben mit Template / ablehnen / Zertifikat erzeugen),
 Stammzertifikate (nur Import von Zertifikat + Key, die Root wird offline erzeugt; aktiv/inaktiv), Templates, Schüler-/Admin-Passwort
@@ -35,6 +41,34 @@ und Passworthinweis.
   Extensions werden ignoriert. Die Laufzeit wird auf die Gültigkeit des Stammzertifikats gekürzt.
 * **Verifikation:** Beim Einreichen sind Kontaktperson und Kontaktweg (E-Mail, Teams oder Telefon, mit Kontaktangabe) Pflicht und werden serverseitig validiert (E-Mail-/Telefonformat). Die Administration sieht sie in der CSR-Liste und im Detail; für Schüler sind sie nicht abrufbar. Ein Hinweis zur Verifikation steht auf der Schülerseite.
 * CSRs werden abgelehnt bei ungültiger Signatur, fehlendem CN, RSA < 2048 Bit oder nicht unterstützter Kurve (steht auch öffentlich auf der Startseite).
+
+## Zwischen-CA verwalten (Klassen-Seite)
+
+Unter dem Abruf-Code eines ausgestellten Zwischenzertifikats gibt es das Häkchen „Ich möchte die
+Zwischenzertifizierungsstelle hier verwalten“. Es legt die Ressource `/ca/<Token>` an (128 Bit
+Zufall, ohne Login nutzbar), die der Inhaber an die Klasse weitergibt.
+
+* **Klassen-Seite (öffentlich, per URL):** Zwischenzertifikat herunterladen (PEM/DER/Kette), Tabelle
+  aller Anfragen und ausgestellten Zertifikate (Download PEM/Kette/Vollkette/DER), neue Anfrage per
+  eigenem CSR oder **Quick-Zertifikat** (CN, OU, SAN, E → Schlüssel und CSR werden serverseitig
+  erzeugt; der Private Key steht nur in der Antwort, wird nicht gespeichert und ist nur einmal
+  herunterladbar). Einreichen erfordert Captcha, Rate-Limit und ist je Zwischen-CA auf 300 Anfragen begrenzt.
+* **Inhaber-Bereich (Abruf-Code + Captcha bzw. Abruf-Sitzung):** Anfragen prüfen, Subject/SAN/Laufzeit anpassen, freigeben
+  (= ausstellen) oder mit Grund ablehnen. Den Schlüssel der Zwischen-CA kann der Inhaber
+  **dauerhaft hinterlegen** (AES-256-GCM, eigener abgeleiteter Schlüssel `ca-key`) oder bei jeder
+  Freigabe **neu hochladen** (wird nur im Request verwendet). Ein hinterlegter Schlüssel ist für die
+  Betreiber technisch entschlüsselbar – die Oberfläche weist darauf hin.
+* **Pflichtangaben & Subject:** OU und E-Mail sind bei jeder Anfrage (Quick und CSR) und bei der
+  Freigabe Pflicht, damit der Antragsteller identifizierbar ist. C, ST, L und O werden aus dem
+  Zwischenzertifikat vorbelegt; der Inhaber kann sie bei der Freigabe anpassen. Die Laufzeit ist im
+  Freigabeformular begrenzt auf die Restlaufzeit der Zwischen-CA (max. 825 Tage); längere Werte
+  lehnt der Server ab.
+* **Endzertifikate:** CA:FALSE, KeyUsage digitalSignature (+ keyEncipherment bei RSA), EKU
+  serverAuth + clientAuth, SAN, SKI/AKI. SANs außerhalb der Name Constraints der Zwischen-CA werden
+  beim Ausstellen abgelehnt. 
+* Die Administration sieht in der CSR-Liste je Zwischenzertifikat ein „+“, das alle verwalteten
+  Zertifikate (CN, OU, E-Mail, SAN, Antragsteller, Status, Laufzeit) aufklappt, und kann die Verwaltung im CSR-Detail deaktivieren (löscht
+  Klassen-URL, Anfragen und gespeicherten Schlüssel).
 
 ## Einrichtung
 

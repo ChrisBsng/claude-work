@@ -18,6 +18,7 @@ export interface SubjectFields {
 }
 
 export interface CsrInfo {
+	sans: SanEntry[];
 	subject: string;
 	cn: string | null;
 	fields: Partial<SubjectFields>;
@@ -86,7 +87,7 @@ export async function analyzeCsr(csrPem: string): Promise<CsrInfo> {
 		if (v) fields[f] = v;
 	}
 	if (!fields.CN) throw new PkiError("Der CSR enthält keinen Common Name (CN). Bitte die Klasse im CN angeben, z. B. -subj \"/CN=FI-25a\".");
-	return { subject: csr.subject, cn: fields.CN ?? null, fields, keyInfo: describeKey(alg) };
+	return { subject: csr.subject, cn: fields.CN ?? null, fields, keyInfo: describeKey(alg), sans: sansFromCsr(csr) };
 }
 
 // ---- Root-CA ---------------------------------------------------------------
@@ -139,6 +140,36 @@ export async function importSigningKey(pkcs8: Uint8Array, certPublicAlg: any, ex
 	}
 }
 
+// Prüft, dass der (unverschlüsselte, PKCS#8-)Private Key zum Zertifikat gehört
+// (Testsignatur), und liefert die PKCS#8-Bytes.
+async function checkKeyMatchesCert(cert: x509.X509Certificate, keyPem: string): Promise<Uint8Array> {
+	const alg = cert.publicKey.algorithm as any;
+	const pkcs8 = pkcs8FromPem(keyPem);
+	const signingKey = await importSigningKey(pkcs8, alg);
+	const probe = crypto.getRandomValues(new Uint8Array(32));
+	const sigAlg = signingAlgorithmFor(alg);
+	const signature = await crypto.subtle.sign(sigAlg, signingKey, probe);
+	const pub = await cert.publicKey.export(
+		sigAlg.name === "ECDSA" ? { name: "ECDSA", namedCurve: alg.namedCurve } : { name: sigAlg.name, hash: sigAlg.hash },
+		["verify"],
+	);
+	if (!(await crypto.subtle.verify(sigAlg, pub, signature, probe))) {
+		throw new PkiError("Der Private Key gehört nicht zu diesem Zertifikat.");
+	}
+	return pkcs8;
+}
+
+// Für Inhaber einer Zwischen-CA: Key prüfen, der zum ausgestellten Zertifikat passen muss.
+export async function validateCaKey(certPem: string, keyPem: string): Promise<Uint8Array> {
+	let cert: x509.X509Certificate;
+	try {
+		cert = new x509.X509Certificate(normalizeCertPem(certPem));
+	} catch {
+		throw new PkiError("Das Zwischenzertifikat konnte nicht gelesen werden.");
+	}
+	return checkKeyMatchesCert(cert, keyPem);
+}
+
 // Prüft Zertifikat + Key (CA-Flag, Key gehört zum Zertifikat) und liefert
 // Metadaten sowie die PKCS#8-Bytes zur verschlüsselten Ablage.
 export async function validateRootImport(certPem: string, keyPem: string): Promise<{ info: RootInfo; pkcs8: Uint8Array }> {
@@ -154,19 +185,7 @@ export async function validateRootImport(certPem: string, keyPem: string): Promi
 	assertSupportedKey(alg);
 	if (cert.notAfter.getTime() < Date.now()) throw new PkiError("Das Zertifikat ist bereits abgelaufen.");
 
-	const pkcs8 = pkcs8FromPem(keyPem);
-	const signingKey = await importSigningKey(pkcs8, alg);
-
-	const probe = crypto.getRandomValues(new Uint8Array(32));
-	const sigAlg = signingAlgorithmFor(alg);
-	const signature = await crypto.subtle.sign(sigAlg, signingKey, probe);
-	const pub = await cert.publicKey.export(
-		sigAlg.name === "ECDSA" ? { name: "ECDSA", namedCurve: alg.namedCurve } : { name: sigAlg.name, hash: sigAlg.hash },
-		["verify"],
-	);
-	if (!(await crypto.subtle.verify(sigAlg, pub, signature, probe))) {
-		throw new PkiError("Der Private Key gehört nicht zu diesem Zertifikat.");
-	}
+	const pkcs8 = await checkKeyMatchesCert(cert, keyPem);
 	return { info: await describeCert(cert), pkcs8 };
 }
 
@@ -250,7 +269,7 @@ export interface IssuedCert {
 	truncated: boolean;
 }
 
-function randomSerial(): string {
+export function randomSerial(): string {
 	const bytes = crypto.getRandomValues(new Uint8Array(16));
 	bytes[0] = (bytes[0] & 0x7f) | 0x40; // positiv, führendes Byte ≠ 0
 	return [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
@@ -336,4 +355,199 @@ export async function issueIntermediate(p: IssueParams): Promise<IssuedCert> {
 
 export function certPemToDer(certPem: string): Uint8Array {
 	return new Uint8Array(x509.PemConverter.decode(certPem)[0]);
+}
+
+
+// ---- Endzertifikate (Zwischen-CA stellt für Mitschüler aus) ------------------------
+
+export interface SanEntry {
+	type: "dns" | "ip" | "email";
+	value: string;
+}
+
+const DNS_NAME = /^(\*\.)?([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)*[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/i;
+const IPV4 = /^(25[0-5]|2[0-4]\d|1?\d?\d)(\.(25[0-5]|2[0-4]\d|1?\d?\d)){3}$/;
+const IPV6 = /^[0-9a-f:.]+$/i;
+const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+export const MAX_SANS = 20;
+
+// Komma-/Leerzeichen-getrennte Eingabe -> typisierte SAN-Einträge.
+export function parseSanList(input: string | null | undefined): SanEntry[] {
+	const items = (input ?? "")
+		.split(/[\s,;]+/)
+		.map((x) => x.trim())
+		.filter(Boolean);
+	if (items.length > MAX_SANS) throw new PkiError(`Höchstens ${MAX_SANS} SAN-Einträge erlaubt.`);
+	const seen = new Set<string>();
+	const out: SanEntry[] = [];
+	for (const raw of items) {
+		let entry: SanEntry;
+		if (raw.includes("@")) {
+			if (!EMAIL.test(raw)) throw new PkiError(`Ungültige E-Mail im SAN: ${raw}`);
+			entry = { type: "email", value: raw };
+		} else if (IPV4.test(raw) || (raw.includes(":") && IPV6.test(raw))) {
+			entry = { type: "ip", value: raw };
+		} else if (!/^[\d.]+$/.test(raw) && DNS_NAME.test(raw) && raw.length <= 253) {
+			entry = { type: "dns", value: raw.toLowerCase() };
+		} else {
+			throw new PkiError(`Ungültiger SAN-Eintrag (DNS-Name, IP oder E-Mail erwartet): ${raw}`);
+		}
+		const key = `${entry.type}:${entry.value}`;
+		if (!seen.has(key)) {
+			seen.add(key);
+			out.push(entry);
+		}
+	}
+	return out;
+}
+
+export const sanToString = (sans: SanEntry[]) => sans.map((x) => x.value).join(", ");
+
+function sansFromCsr(csr: x509.Pkcs10CertificateRequest): SanEntry[] {
+	const ext = csr.extensions.find((e): e is x509.SubjectAlternativeNameExtension => e instanceof x509.SubjectAlternativeNameExtension);
+	const out: SanEntry[] = [];
+	for (const n of ext?.names.items ?? []) {
+		if (n.type === "dns" || n.type === "ip" || n.type === "email") out.push({ type: n.type, value: n.value });
+	}
+	return out.slice(0, MAX_SANS);
+}
+
+// Erlaubte DNS-Bereiche (Name Constraints) einer Zwischen-CA.
+export function permittedDnsOfCert(certPem: string): string[] {
+	const cert = new x509.X509Certificate(certPem);
+	const ext = cert.extensions.find((e) => e.type === id_ce_nameConstraints);
+	if (!ext) return [];
+	const nc = AsnConvert.parse(ext.value, NameConstraints);
+	return [...(nc.permittedSubtrees ?? [])].map((st) => st.base.dNSName).filter((d): d is string => Boolean(d));
+}
+
+function dnsPermitted(name: string, permitted: string[]): boolean {
+	const n = name.toLowerCase().replace(/^\*\./, "");
+	return permitted.some((p) => {
+		const d = p.toLowerCase();
+		return d.startsWith(".") ? n.endsWith(d) : n === d || n.endsWith("." + d);
+	});
+}
+
+// Würde ein SAN außerhalb der Name Constraints der CA liegen, lehnen Clients das
+// Zertifikat ab – deshalb schon beim Ausstellen verhindern.
+export function assertWithinNameConstraints(permitted: string[], sans: SanEntry[], cn: string): void {
+	if (!permitted.length) return;
+	for (const s of sans) {
+		if (s.type === "dns" && !dnsPermitted(s.value, permitted)) {
+			throw new PkiError(`„${s.value}" liegt außerhalb der erlaubten Domains dieser Zwischen-CA (${permitted.join(", ")}).`);
+		}
+	}
+	if (!sans.length && DNS_NAME.test(cn) && !dnsPermitted(cn, permitted)) {
+		throw new PkiError(`„${cn}" liegt außerhalb der erlaubten Domains dieser Zwischen-CA (${permitted.join(", ")}).`);
+	}
+}
+
+export interface LeafSubject {
+	C?: string;
+	ST?: string;
+	L?: string;
+	O?: string;
+	OU?: string;
+	CN: string;
+	E?: string;
+}
+
+export interface IssueLeafParams {
+	caCertPem: string;
+	caPkcs8: Uint8Array;
+	csrPem: string;
+	subject: LeafSubject;
+	sans: SanEntry[];
+	validityDays: number;
+}
+
+export const MAX_LEAF_VALIDITY_DAYS = 825;
+
+export async function issueLeaf(p: IssueLeafParams): Promise<IssuedCert> {
+	const caCert = new x509.X509Certificate(p.caCertPem);
+	const caAlg = caCert.publicKey.algorithm as any;
+	const signAlg = signingAlgorithmFor(caAlg);
+	const signingKey = await importSigningKey(p.caPkcs8, caAlg);
+
+	const cn = p.subject.CN?.trim();
+	if (!cn || cn.length > 64) throw new PkiError("Common Name (CN) erforderlich (höchstens 64 Zeichen).");
+	if (!Number.isInteger(p.validityDays) || p.validityDays < 1 || p.validityDays > MAX_LEAF_VALIDITY_DAYS) {
+		throw new PkiError(`Gültigkeit: 1–${MAX_LEAF_VALIDITY_DAYS} Tage.`);
+	}
+	const csr = new x509.Pkcs10CertificateRequest(p.csrPem);
+	if (!(await csr.verify())) throw new PkiError("Die Signatur des CSR ist ungültig.");
+	assertSupportedKey(csr.publicKey.algorithm as any);
+	assertWithinNameConstraints(permittedDnsOfCert(p.caCertPem), p.sans, cn);
+
+	const now = Date.now();
+	if (caCert.notAfter.getTime() <= now) throw new PkiError("Das Zwischenzertifikat ist abgelaufen.");
+	const notBefore = new Date(now - 5 * 60_000);
+	let notAfter = new Date(now + p.validityDays * 86_400_000);
+	let truncated = false;
+	if (notAfter > caCert.notAfter) {
+		notAfter = caCert.notAfter;
+		truncated = true;
+	}
+
+	const isRsa = (csr.publicKey.algorithm as any).name === "RSASSA-PKCS1-v1_5";
+	const extensions: x509.Extension[] = [
+		new x509.BasicConstraintsExtension(false, undefined, true),
+		new x509.KeyUsagesExtension(x509.KeyUsageFlags.digitalSignature | (isRsa ? x509.KeyUsageFlags.keyEncipherment : 0), true),
+		new x509.ExtendedKeyUsageExtension([x509.ExtendedKeyUsage.serverAuth, x509.ExtendedKeyUsage.clientAuth], false),
+		await x509.SubjectKeyIdentifierExtension.create(csr.publicKey),
+		await x509.AuthorityKeyIdentifierExtension.create(caCert.publicKey),
+	];
+	if (p.sans.length) extensions.push(new x509.SubjectAlternativeNameExtension(p.sans.map((s) => ({ type: s.type, value: s.value }))));
+
+	const name: x509.JsonName = [];
+	for (const f of ["C", "ST", "L", "O", "OU", "CN", "E"] as const) {
+		const v = (f === "CN" ? cn : p.subject[f])?.trim();
+		if (v) name.push({ [f]: [v] });
+	}
+	const serialNumber = randomSerial();
+	const cert = await x509.X509CertificateGenerator.create({
+		serialNumber,
+		subject: name,
+		issuer: caCert.subjectName,
+		notBefore,
+		notAfter,
+		publicKey: csr.publicKey,
+		signingKey,
+		signingAlgorithm: signAlg,
+		extensions,
+	});
+	return { certPem: pem(cert.rawData, "CERTIFICATE"), serialNumber, notBefore: notBefore.toISOString(), notAfter: notAfter.toISOString(), truncated };
+}
+
+// Quick-Zertifikat: Schlüssel (EC P-256) und CSR erzeugen. Der Private Key wird
+// nur zurückgegeben und nirgends gespeichert.
+export async function generateQuickRequest(p: { cn: string; ou?: string; email?: string; sans: SanEntry[] }): Promise<{ csrPem: string; privateKeyPem: string; keyInfo: string }> {
+	const alg = { name: "ECDSA", namedCurve: "P-256", hash: "SHA-256" };
+	const keys = (await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, ["sign", "verify"])) as CryptoKeyPair;
+	const name: x509.JsonName = [];
+	if (p.ou) name.push({ OU: [p.ou] });
+	name.push({ CN: [p.cn] });
+	if (p.email) name.push({ E: [p.email] });
+	const csr = await x509.Pkcs10CertificateRequestGenerator.create({
+		name,
+		keys,
+		signingAlgorithm: alg,
+		extensions: p.sans.length ? [new x509.SubjectAlternativeNameExtension(p.sans.map((s) => ({ type: s.type, value: s.value })))] : [],
+	});
+	const pkcs8 = (await crypto.subtle.exportKey("pkcs8", keys.privateKey)) as ArrayBuffer;
+	return { csrPem: csr.toString("pem"), privateKeyPem: pem(pkcs8, "PRIVATE KEY"), keyInfo: "EC P-256" };
+}
+
+// Standort-/Organisationsfelder (C, ST, L, O) einer Zertifikats-Subject – Vorbelegung für
+// die Endzertifikate einer Zwischen-CA.
+export function locationFieldsOfCert(certPem: string): { C: string; ST: string; L: string; O: string } {
+	const cert = new x509.X509Certificate(certPem);
+	const f = (n: string) => (cert.subjectName.getField(n)[0] as string | undefined) ?? "";
+	return { C: f("C"), ST: f("ST"), L: f("L"), O: f("O") };
+}
+
+export function remainingDays(certPem: string): number {
+	const cert = new x509.X509Certificate(certPem);
+	return Math.max(0, Math.floor((cert.notAfter.getTime() - Date.now()) / 86_400_000));
 }

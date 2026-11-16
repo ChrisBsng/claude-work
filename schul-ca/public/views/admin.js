@@ -112,11 +112,12 @@ async function renderCsrs(panel, root) {
 		${
 			csrs.length
 				? `<table>
-			<thead><tr><th>Klasse</th><th>Kontakt</th><th>Subject (CSR)</th><th>Key</th><th>Stamm-CA</th><th>Eingereicht</th><th>Status</th><th></th></tr></thead>
+			<thead><tr><th></th><th>Klasse</th><th>Kontakt</th><th>Subject (CSR)</th><th>Key</th><th>Stamm-CA</th><th>Eingereicht</th><th>Status</th><th></th></tr></thead>
 			<tbody>${csrs
 				.map(
-					(c) => `<tr>
-				<td><strong>${esc(c.label)}</strong></td><td class="small">${esc(c.contactPerson || "–")}<br><span class="muted">${esc(contactLabel(c))}</span></td><td class="small">${esc(c.subject)}</td><td class="small">${esc(c.keyInfo)}</td>
+					(c) => `<tr data-row="${c.id}">
+				<td class="expander">${c.management ? `<button class="expand" data-expand="${c.id}" aria-expanded="false" title="Verwaltete Zertifikate anzeigen">+</button>` : ""}</td>
+				<td><strong>${esc(c.label)}</strong>${c.management ? `<div class="muted small">${c.management.requests} verwaltete Zertifikate</div>` : ""}</td><td class="small">${esc(c.contactPerson || "–")}<br><span class="muted">${esc(contactLabel(c))}</span></td><td class="small">${esc(c.subject)}</td><td class="small">${esc(c.keyInfo)}</td>
 				<td class="small">${esc(c.rootName)}</td><td class="small">${esc(formatDate(c.submittedAt))}</td>
 				<td><span class="badge status-${esc(c.status)}">${esc(STATUS_LABELS[c.status])}</span></td>
 				<td><button class="secondary" data-open="${c.id}">Öffnen</button></td></tr>`,
@@ -129,6 +130,32 @@ async function renderCsrs(panel, root) {
 		b.addEventListener("click", () => {
 			csrFilter = b.dataset.filter;
 			renderShell(root);
+		}),
+	);
+	panel.querySelectorAll("[data-expand]").forEach((b) =>
+		b.addEventListener("click", async () => {
+			const row = b.closest("tr");
+			const open = b.getAttribute("aria-expanded") === "true";
+			row.nextElementSibling?.matches(".leaf-row") && row.nextElementSibling.remove();
+			b.setAttribute("aria-expanded", String(!open));
+			b.textContent = open ? "+" : "−";
+			if (open) return;
+			const detail = document.createElement("tr");
+			detail.className = "leaf-row";
+			detail.innerHTML = `<td></td><td colspan="8"><p class="muted small">Lädt…</p></td>`;
+			row.after(detail);
+			try {
+				const { leaves } = await api(`/csrs/${b.dataset.expand}/leaves`);
+				detail.firstElementChild.nextElementSibling.innerHTML = leaves.length
+					? `<table class="sub"><thead><tr><th>Art</th><th>CN</th><th>OU</th><th>E-Mail</th><th>SAN</th><th>Antragsteller</th><th>Status</th><th>Gültig bis</th></tr></thead><tbody>${leaves
+							.map(
+								(l) => `<tr><td>${l.kind === "quick" ? "Quick" : "CSR"}</td><td><strong>${esc(l.cn)}</strong></td><td class="small">${esc(l.ou || "–")}</td><td class="small">${esc(l.email || "–")}</td><td class="small mono">${esc(l.san || "–")}</td><td class="small">${esc(l.requester || "–")}</td><td><span class="badge status-${esc(l.status)}">${esc(STATUS_LABELS[l.status] ?? l.status)}</span>${l.rejectReason ? `<div class="muted small">${esc(l.rejectReason)}</div>` : ""}</td><td class="small">${esc(l.status === "issued" ? formatDay(l.notAfter) : "–")}</td></tr>`,
+							)
+							.join("")}</tbody></table>`
+					: `<p class="muted small">Für diese Zwischenzertifizierungsstelle gibt es noch keine Anfragen.</p>`;
+			} catch (e) {
+				detail.firstElementChild.nextElementSibling.innerHTML = `<p class="error">${esc(e.message)}</p>`;
+			}
 		}),
 	);
 	panel.querySelectorAll("[data-open]").forEach((b) =>
@@ -166,6 +193,7 @@ function renderCsrDetail(box, csr, templates, root) {
 				<dt>Eingereicht</dt><dd>${esc(formatDate(csr.submittedAt))}</dd>
 				${csr.templateName ? `<dt>Template</dt><dd>${esc(csr.templateName)}</dd>` : ""}
 				${csr.rejectReason ? `<dt>Ablehnungsgrund</dt><dd>${esc(csr.rejectReason)}</dd>` : ""}
+				${csr.management ? `<dt>Verwaltung</dt><dd>aktiv · <a href="/ca/${esc(csr.management.token)}" target="_blank" rel="noopener">Klassen-Seite</a> · ${csr.management.requests} Anfragen · Schlüssel ${csr.management.keyStored ? "hinterlegt" : "nicht hinterlegt"}</dd>` : ""}
 				${csr.status === "issued" ? `<dt>Seriennummer</dt><dd class="mono small">${esc(csr.serialNumber)}</dd><dt>Gültig</dt><dd>${esc(formatDay(csr.notBefore))} – ${esc(formatDay(csr.notAfter))}</dd>` : ""}
 			</dl>
 			<details><summary>CSR (PEM)</summary><pre>${esc(csr.csrPem)}</pre></details>
@@ -206,7 +234,7 @@ function renderCsrDetail(box, csr, templates, root) {
 			</div>`
 					: ""
 			}
-			<div class="actions"><button class="danger secondary" id="delete">CSR löschen</button></div>
+			<div class="actions">${csr.management ? `<button class="secondary" id="unmanage">Verwaltung deaktivieren</button>` : ""}<button class="danger secondary" id="delete">CSR löschen</button></div>
 		</div>`;
 	box.scrollIntoView({ behavior: "smooth" });
 
@@ -251,6 +279,11 @@ function renderCsrDetail(box, csr, templates, root) {
 		});
 	}
 	box.querySelectorAll("[data-cert]").forEach((b) => b.addEventListener("click", () => apiDownload(`/csrs/${csr.id}/certificate?format=${b.dataset.cert}`).catch((e) => alert(e.message))));
+	box.querySelector("#unmanage")?.addEventListener("click", () => {
+		if (confirm("Verwaltung deaktivieren? Klassen-Seite, Anfragen und ein hinterlegter Schlüssel werden gelöscht.")) {
+			run(() => api(`/csrs/${csr.id}/management`, { method: "DELETE" }), root, rerender);
+		}
+	});
 	box.querySelector("#delete").addEventListener("click", () => {
 		if (confirm(`CSR „${csr.label}“ endgültig löschen? Das ausgestellte Zertifikat (falls vorhanden) bleibt gültig, ist aber nicht mehr abrufbar.`)) {
 			run(() => api(`/csrs/${csr.id}`, { method: "DELETE" }), root, rerender);

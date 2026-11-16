@@ -1,4 +1,5 @@
 import { call, download, esc, formatDay, formatDate } from "/api.js";
+import { mountCaptcha } from "/captcha.js";
 
 const TOKEN_KEY = "schulCa.studentToken";
 const STATUS_LABELS = {
@@ -11,8 +12,9 @@ const STATUS_LABELS = {
 const getToken = () => sessionStorage.getItem(TOKEN_KEY);
 const clearToken = () => sessionStorage.removeItem(TOKEN_KEY);
 
-// Seite = öffentlicher Teil (Anforderungen, Root-Downloads) + geschützter Teil
-// (CSR-Upload, Abruf), der erst nach Passwort + Captcha erscheint.
+// Seite = öffentlicher Teil (Anforderungen, Root-Downloads) und zwei getrennte Zugänge:
+//   1. Neues Zwischenzertifikat beantragen  -> Schülerpasswort + Captcha
+//   2. Status prüfen, Zertifikat abrufen und verwalten -> Abruf-Code + Captcha
 export async function renderStudent(root) {
 	let loggedIn = false;
 	if (getToken()) {
@@ -32,24 +34,19 @@ export async function renderStudent(root) {
 		<header class="page-head">
 			<span class="badge-pill">Zwischenzertifikate für Klassen</span>
 			<h1>Schul-<span>CA</span></h1>
-			<p>Stammzertifikat herunterladen, Zertifikatsanforderung (CSR) einreichen und das Zwischenzertifikat deiner Klasse abrufen.</p>
-			${loggedIn ? `<p><button class="secondary" id="logout">Abmelden</button></p>` : ""}
+			<p>Stammzertifikat herunterladen, ein Zwischenzertifikat beantragen oder den Stand eines bestehenden Antrags abrufen und verwalten.</p>
 		</header>
 		${requirementsHtml()}
 		${rootsHtml(roots)}
-		<div id="protected"></div>`;
+		<section class="card" id="apply"></section>
+		<section class="card" id="pickup"></section>`;
 
-	root.querySelector("#logout")?.addEventListener("click", () => {
-		clearToken();
-		renderStudent(root);
-	});
 	root.querySelectorAll("[data-dl]").forEach((btn) =>
 		btn.addEventListener("click", () => download(`/api/student/roots/${btn.dataset.dl}/download?format=${btn.dataset.format}`).catch((e) => alert(e.message))),
 	);
 
-	const box = root.querySelector("#protected");
-	if (loggedIn) renderPortal(root, box, roots);
-	else renderLogin(root, box, info);
+	renderApply(root, root.querySelector("#apply"), roots, info, loggedIn);
+	renderPickup(root.querySelector("#pickup"));
 }
 
 function requirementsHtml() {
@@ -63,6 +60,7 @@ function requirementsHtml() {
 				<li><strong>Common Name:</strong> Der CSR muss einen <code>CN</code> enthalten, der die Klasse eindeutig bezeichnet (z. B. <code>FI-25a</code>).</li>
 				<li><strong>Private Key:</strong> bleibt bei euch – es wird nur der CSR hochgeladen, <strong>niemals</strong> die <code>.key</code>-Datei.</li>
 				<li><strong>Inhalt des Zertifikats:</strong> Der öffentliche Schlüssel kommt aus dem CSR. Organisation, Land usw. sowie alle Erweiterungen (CA-Zertifikat, Pfadlänge, Namensbeschränkungen, Laufzeit) legt die Schule per Vorlage fest; im CSR angeforderte Erweiterungen werden ignoriert.</li>
+				<li><strong>Zugang:</strong> Zum <em>Beantragen</em> brauchst du das Schulpasswort. Zum späteren <em>Abrufen, Prüfen und Verwalten</em> genügt der Abruf-Code, den du beim Beantragen erhältst.</li>
 				<li><strong>Kontaktangaben (Pflicht):</strong> Beim Einreichen sind <strong>Kontaktperson</strong> und ein <strong>Kontaktweg</strong> (E-Mail, Teams oder Telefon) anzugeben. Darüber meldet sich die Administration zur Verifikation.</li>
 				<li><strong>Freigabe:</strong> Jeder CSR wird von der Administration geprüft und kann mit Begründung abgelehnt werden.</li>
 			</ul>
@@ -92,70 +90,11 @@ function rootsHtml(roots) {
 	return `<section class="card"><h2>Stammzertifikate herunterladen</h2>${list}</section>`;
 }
 
-async function renderLogin(root, box, info) {
-	box.innerHTML = `
-		<section class="card narrow">
-			<h2>CSR einreichen &amp; Zertifikat abrufen</h2>
-			${
-				info.enabled
-					? `<p class="muted small">Dafür bitte mit dem Schulpasswort anmelden.</p>
-			<form id="login" autocomplete="off">
-				<label>Anmeldepasswort
-					<input type="password" name="password" required />
-				</label>
-				${info.passwordHint ? `<p class="hint">💡 ${esc(info.passwordHint)}</p>` : ""}
-				<div class="captcha-row">
-					<div id="captcha" class="captcha" aria-live="polite">…</div>
-					<button type="button" class="secondary" id="reload" title="Neues Captcha">↻</button>
-				</div>
-				<label>Zeichen aus dem Bild
-					<input type="text" name="captcha" required autocomplete="off" autocapitalize="characters" maxlength="8" />
-				</label>
-				<p class="error" id="error" role="alert"></p>
-				<button type="submit">Anmelden</button>
-			</form>`
-					: `<p>Der Bereich zum Einreichen ist noch nicht freigeschaltet. Bitte wende dich an die Administration.</p>`
-			}
-		</section>`;
-	if (!info.enabled) return;
+// ---- 1. Beantragen: Schülerpasswort + Captcha, dann CSR-Upload ---------------------------
 
-	let captchaToken = "";
-	const loadCaptcha = async () => {
-		const c = box.querySelector("#captcha");
-		try {
-			const res = await call("/api/student/captcha");
-			captchaToken = res.token;
-			c.innerHTML = res.svg;
-		} catch (e) {
-			c.textContent = e.message;
-		}
-		box.querySelector('[name="captcha"]').value = "";
-	};
-	box.querySelector("#reload").addEventListener("click", loadCaptcha);
-	loadCaptcha();
+async function renderApply(root, box, roots, info, loggedIn) {
+	if (!loggedIn) return renderApplyLogin(root, box, info);
 
-	box.querySelector("#login").addEventListener("submit", async (event) => {
-		event.preventDefault();
-		const form = event.currentTarget;
-		const err = box.querySelector("#error");
-		err.textContent = "";
-		try {
-			const { token } = await call("/api/student/login", {
-				method: "POST",
-				body: { password: form.password.value, captchaToken, captchaAnswer: form.captcha.value },
-			});
-			sessionStorage.setItem(TOKEN_KEY, token);
-			renderStudent(root);
-		} catch (e) {
-			err.textContent = e.message;
-			form.password.select();
-			loadCaptcha();
-		}
-	});
-}
-
-function renderPortal(root, box, roots) {
-	const token = getToken();
 	const onAuthError = (e) => {
 		if (e.status === 401) {
 			clearToken();
@@ -164,74 +103,68 @@ function renderPortal(root, box, roots) {
 		}
 		return false;
 	};
+	const token = getToken();
 
 	box.innerHTML = `
-		<section class="card">
-			<h2>CSR hochladen</h2>
-			<details class="help">
-				<summary>Wie erzeuge ich einen CSR?</summary>
-				<p>Mit OpenSSL (der Schlüssel bleibt bei dir):</p>
-				<pre>openssl req -new -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \\
+		<div class="card-head"><h2>Neues Zwischenzertifikat beantragen</h2><button class="secondary" id="logout">Abmelden</button></div>
+		<details class="help">
+			<summary>Wie erzeuge ich einen CSR?</summary>
+			<p>Mit OpenSSL (der Schlüssel bleibt bei dir):</p>
+			<pre>openssl req -new -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \\
   -keyout klasse.key -out klasse.csr -subj "/CN=Klasse FI-25"</pre>
-			</details>
-			<form id="upload">
-				<label>Stammzertifikat, von dem ausgestellt werden soll
-					<select name="rootId" required>${roots.map((r) => `<option value="${r.id}">${esc(r.name)}</option>`).join("")}</select>
+		</details>
+		<form id="upload">
+			<label>Stammzertifikat, von dem ausgestellt werden soll
+				<select name="rootId" required>${roots.map((r) => `<option value="${r.id}">${esc(r.name)}</option>`).join("")}</select>
+			</label>
+			<label>Klasse / Bezeichnung
+				<input type="text" name="label" required maxlength="80" placeholder="z. B. FI-25a" />
+			</label>
+			<fieldset class="contact">
+				<legend>Kontakt für die Verifikation (Pflicht)</legend>
+				<p class="notice">ℹ️ Bevor ein Zwischenzertifikat ausgestellt wird, <strong>prüft die Administration die Anfrage</strong> und nimmt dazu über den angegebenen Kontaktweg Kontakt mit der Kontaktperson auf. Bitte nur Angaben machen, unter denen die Person in der Schulzeit erreichbar ist. Ohne erfolgreiche Verifikation wird kein Zertifikat ausgestellt. Die Daten werden ausschließlich für diese Prüfung verwendet.</p>
+				<label>Kontaktperson (Vor- und Nachname)
+					<input type="text" name="contactPerson" required minlength="2" maxlength="80" autocomplete="name" placeholder="z. B. Max Mustermann" />
 				</label>
-				<label>Klasse / Bezeichnung
-					<input type="text" name="label" required maxlength="80" placeholder="z. B. FI-25a" />
-				</label>
-				<fieldset class="contact">
-					<legend>Kontakt für die Verifikation (Pflicht)</legend>
-					<p class="notice">ℹ️ Bevor ein Zwischenzertifikat ausgestellt wird, <strong>prüft die Administration die Anfrage</strong> und nimmt dazu über den angegebenen Kontaktweg Kontakt mit der Kontaktperson auf. Bitte nur Angaben machen, unter denen die Person in der Schulzeit erreichbar ist. Ohne erfolgreiche Verifikation wird kein Zertifikat ausgestellt. Die Daten werden ausschließlich für diese Prüfung verwendet.</p>
-					<label>Kontaktperson (Vor- und Nachname)
-						<input type="text" name="contactPerson" required minlength="2" maxlength="80" autocomplete="name" placeholder="z. B. Max Mustermann" />
+				<div class="grid">
+					<label>Kontaktweg
+						<select name="contactMethod" required>
+							<option value="">– wählen –</option>
+							<option value="email">E-Mail</option>
+							<option value="teams">Microsoft Teams</option>
+							<option value="phone">Telefon</option>
+						</select>
 					</label>
-					<div class="grid">
-						<label>Kontaktweg
-							<select name="contactMethod" required>
-								<option value="">– wählen –</option>
-								<option value="email">E-Mail</option>
-								<option value="teams">Microsoft Teams</option>
-								<option value="phone">Telefon</option>
-							</select>
-						</label>
-						<label><span id="contactDetailLabel">Kontaktangabe</span>
-							<input type="text" name="contactDetail" required minlength="3" maxlength="120" placeholder="zuerst Kontaktweg wählen" />
-						</label>
-					</div>
-				</fieldset>
-				<label>CSR (PEM) – einfügen oder Datei wählen
-					<textarea name="csr" rows="8" required placeholder="-----BEGIN CERTIFICATE REQUEST-----" spellcheck="false"></textarea>
-				</label>
-				<input type="file" id="csrFile" accept=".csr,.pem,.txt,.req" />
-				<p class="error" id="uploadError" role="alert"></p>
-				<button type="submit" ${roots.length ? "" : "disabled"}>CSR einreichen</button>
-			</form>
-			<div id="codeBox" hidden></div>
-		</section>
+					<label><span id="contactDetailLabel">Kontaktangabe</span>
+						<input type="text" name="contactDetail" required minlength="3" maxlength="120" placeholder="zuerst Kontaktweg wählen" />
+					</label>
+				</div>
+			</fieldset>
+			<label>CSR (PEM) – einfügen oder Datei wählen
+				<textarea name="csr" rows="8" required placeholder="-----BEGIN CERTIFICATE REQUEST-----" spellcheck="false"></textarea>
+			</label>
+			<input type="file" id="csrFile" accept=".csr,.pem,.txt,.req" />
+			<p class="error" id="uploadError" role="alert"></p>
+			<button type="submit" ${roots.length ? "" : "disabled"}>CSR einreichen</button>
+		</form>
+		<div id="codeBox" hidden></div>`;
 
-		<section class="card">
-			<h2>Status prüfen &amp; Zertifikat abrufen</h2>
-			<form id="lookup" class="inline-form">
-				<input type="text" name="code" required placeholder="Abruf-Code, z. B. K7QM-4TXD-9WPB-2HNC" autocomplete="off" autocapitalize="characters" />
-				<button type="submit">Status prüfen</button>
-			</form>
-			<p class="error" id="lookupError" role="alert"></p>
-			<div id="lookupResult"></div>
-		</section>`;
+	box.querySelector("#logout").addEventListener("click", () => {
+		clearToken();
+		renderStudent(root);
+	});
 
-	const contactForm = box.querySelector("#upload");
+	const form = box.querySelector("#upload");
 	const CONTACT_HINTS = {
 		email: ["E-Mail-Adresse", "vorname.nachname@schule.example", "email"],
 		teams: ["Teams-Name oder -Adresse", "z. B. Name in Teams oder Teams-Adresse", "text"],
 		phone: ["Telefonnummer", "z. B. 0123 456789", "tel"],
 	};
-	contactForm.contactMethod.addEventListener("change", () => {
-		const [label, placeholder, type] = CONTACT_HINTS[contactForm.contactMethod.value] ?? ["Kontaktangabe", "zuerst Kontaktweg wählen", "text"];
+	form.contactMethod.addEventListener("change", () => {
+		const [label, placeholder, type] = CONTACT_HINTS[form.contactMethod.value] ?? ["Kontaktangabe", "zuerst Kontaktweg wählen", "text"];
 		box.querySelector("#contactDetailLabel").textContent = label;
-		contactForm.contactDetail.placeholder = placeholder;
-		contactForm.contactDetail.type = type;
+		form.contactDetail.placeholder = placeholder;
+		form.contactDetail.type = type;
 	});
 
 	box.querySelector("#csrFile").addEventListener("change", async (event) => {
@@ -241,12 +174,11 @@ function renderPortal(root, box, roots) {
 			box.querySelector("#uploadError").textContent = "Die Datei ist zu groß – ist das wirklich ein CSR?";
 			return;
 		}
-		box.querySelector('[name="csr"]').value = await file.text();
+		form.csr.value = await file.text();
 	});
 
-	box.querySelector("#upload").addEventListener("submit", async (event) => {
+	form.addEventListener("submit", async (event) => {
 		event.preventDefault();
-		const form = event.currentTarget;
 		const err = box.querySelector("#uploadError");
 		err.textContent = "";
 		if (/PRIVATE KEY/.test(form.csr.value)) {
@@ -275,7 +207,7 @@ function renderPortal(root, box, roots) {
 					<p><strong>CSR eingereicht.</strong> Dein Abruf-Code (wird nur jetzt einmalig angezeigt – bitte notieren!):</p>
 					<div class="code mono">${esc(result.code)}</div>
 					<p class="muted small">${esc(result.subject)} · ${esc(result.keyInfo)}</p>
-					<p class="notice">Die Administration verifiziert deine Anfrage nun über den angegebenen Kontaktweg. Danach wird das Zertifikat ausgestellt.</p>
+					<p class="notice">Die Administration verifiziert deine Anfrage nun über den angegebenen Kontaktweg. Danach wird das Zertifikat ausgestellt. Den Stand siehst du unten unter „Status prüfen" mit diesem Code.</p>
 					<button class="secondary" id="copyCode">Code kopieren</button>
 				</div>`;
 			codeBox.querySelector("#copyCode").addEventListener("click", async (e) => {
@@ -286,46 +218,163 @@ function renderPortal(root, box, roots) {
 					// Zwischenablage nicht verfügbar – Code steht als Text da.
 				}
 			});
-			box.querySelector('#lookup [name="code"]').value = result.code;
+			const codeInput = document.querySelector('#pickupForm [name="code"]');
+			if (codeInput) codeInput.value = result.code;
 		} catch (e) {
 			if (!onAuthError(e)) err.textContent = e.message;
 		}
 	});
+}
 
-	box.querySelector("#lookup").addEventListener("submit", async (event) => {
+async function renderApplyLogin(root, box, info) {
+	box.innerHTML = `
+		<h2>Neues Zwischenzertifikat beantragen</h2>
+		${
+			info.enabled
+				? `<p class="muted small">Zum Beantragen bitte mit dem Schulpasswort anmelden.</p>
+		<form id="login" autocomplete="off" class="narrow-form">
+			<label>Anmeldepasswort
+				<input type="password" name="password" required />
+			</label>
+			${info.passwordHint ? `<p class="hint">💡 ${esc(info.passwordHint)}</p>` : ""}
+			<div data-captcha></div>
+			<p class="error" id="error" role="alert"></p>
+			<button type="submit">Anmelden</button>
+		</form>`
+				: `<p>Das Beantragen ist noch nicht freigeschaltet. Bitte wende dich an die Administration.</p>`
+		}`;
+	if (!info.enabled) return;
+
+	const captcha = mountCaptcha(box.querySelector("[data-captcha]"));
+	box.querySelector("#login").addEventListener("submit", async (event) => {
+		event.preventDefault();
+		const form = event.currentTarget;
+		const err = box.querySelector("#error");
+		err.textContent = "";
+		try {
+			const { token } = await call("/api/student/login", { method: "POST", body: { password: form.password.value, ...captcha.values() } });
+			sessionStorage.setItem(TOKEN_KEY, token);
+			renderStudent(root);
+		} catch (e) {
+			err.textContent = e.message;
+			form.password.select();
+			captcha.reload();
+		}
+	});
+}
+
+// ---- 2. Status prüfen, Zertifikat abrufen & verwalten: Abruf-Code + Captcha ------------
+
+function renderPickup(box) {
+	box.innerHTML = `
+		<h2>Status prüfen, Zertifikat abrufen &amp; verwalten</h2>
+		<p class="muted small">Dafür brauchst du <strong>kein Schulpasswort</strong>, nur den Abruf-Code, den du beim Beantragen erhalten hast.</p>
+		<form id="pickupForm" autocomplete="off" class="narrow-form">
+			<label>Abruf-Code
+				<input type="text" name="code" required placeholder="z. B. K7QM-4TXD-9WPB-2HNC" autocomplete="off" autocapitalize="characters" />
+			</label>
+			<div data-captcha></div>
+			<p class="error" id="pickupError" role="alert"></p>
+			<button type="submit">Status prüfen</button>
+		</form>
+		<div id="pickupResult"></div>`;
+	const captcha = mountCaptcha(box.querySelector("[data-captcha]"));
+	const out = box.querySelector("#pickupResult");
+	const err = box.querySelector("#pickupError");
+
+	box.querySelector("#pickupForm").addEventListener("submit", async (event) => {
 		event.preventDefault();
 		const code = event.currentTarget.code.value;
-		const err = box.querySelector("#lookupError");
-		const out = box.querySelector("#lookupResult");
 		err.textContent = "";
 		out.innerHTML = "";
 		try {
-			const r = await call("/api/student/csrs/lookup", { method: "POST", token, body: { code } });
-			out.innerHTML = `
-				<div class="status status-${esc(r.status)}">${esc(STATUS_LABELS[r.status] ?? r.status)}</div>
-				${r.status === "rejected" ? `<div class="reject-note"><strong>Grund der Ablehnung:</strong> ${esc(r.rejectReason || "(keine Begründung angegeben)")}<br><span class="muted small">Du kannst einen korrigierten CSR erneut einreichen.</span></div>` : ""}
-				<dl>
-					<dt>Bezeichnung</dt><dd>${esc(r.label)}</dd>
-					<dt>Stammzertifikat</dt><dd>${esc(r.rootName)}</dd>
-					<dt>Eingereicht</dt><dd>${esc(formatDate(r.submittedAt))}</dd>
-					${r.status === "issued" ? `<dt>Gültig bis</dt><dd>${esc(formatDay(r.notAfter))}</dd>` : ""}
-				</dl>
-				${
-					r.status === "issued"
-						? `<div class="actions">
-							<button data-cert="chain">Zertifikatskette (.pem)</button>
-							<button class="secondary" data-cert="pem">Nur Zertifikat (.pem)</button>
-							<button class="secondary" data-cert="der">DER (.cer)</button>
-						</div>`
-						: ""
-				}`;
-			out.querySelectorAll("[data-cert]").forEach((btn) =>
-				btn.addEventListener("click", () =>
-					download("/api/student/csrs/certificate", { method: "POST", token, body: { code, format: btn.dataset.cert } }).catch((e) => alert(e.message)),
-				),
-			);
+			const r = await call("/api/student/csrs/lookup", { method: "POST", body: { code, ...captcha.values() } });
+			showPickupResult(out, r, code);
 		} catch (e) {
-			if (!onAuthError(e)) err.textContent = e.message;
+			err.textContent = e.message;
+		}
+		captcha.reload();
+	});
+}
+
+function showPickupResult(out, r, code) {
+	const token = r.pickupToken;
+	out.innerHTML = `
+		<div class="status status-${esc(r.status)}">${esc(STATUS_LABELS[r.status] ?? r.status)}</div>
+		${r.status === "rejected" ? `<div class="reject-note"><strong>Grund der Ablehnung:</strong> ${esc(r.rejectReason || "(keine Begründung angegeben)")}<br><span class="muted small">Du kannst oben einen korrigierten CSR erneut einreichen.</span></div>` : ""}
+		<dl>
+			<dt>Bezeichnung</dt><dd>${esc(r.label)}</dd>
+			<dt>Stammzertifikat</dt><dd>${esc(r.rootName)}</dd>
+			<dt>Eingereicht</dt><dd>${esc(formatDate(r.submittedAt))}</dd>
+			${r.status === "issued" ? `<dt>Gültig bis</dt><dd>${esc(formatDay(r.notAfter))}</dd>` : ""}
+		</dl>
+		${
+			r.status === "issued"
+				? `<div class="actions">
+					<button data-cert="chain">Zertifikatskette (.pem)</button>
+					<button class="secondary" data-cert="pem">Nur Zertifikat (.pem)</button>
+					<button class="secondary" data-cert="der">DER (.cer)</button>
+				</div>
+				<div class="manage-box">
+					<label class="check"><input type="checkbox" id="manage" ${r.management?.enabled ? "checked" : ""} /> Ich möchte die Zwischenzertifizierungsstelle hier verwalten.</label>
+					<p class="muted small">Dafür wird eine eigene Seite für deine Klasse angelegt. Mitschüler können dort ohne Anmeldung CSRs einreichen oder ein Quick-Zertifikat anfordern und deine ausgestellten Zertifikate herunterladen. Du gibst jede Anfrage frei; den Schlüssel deiner Zwischen-CA kannst du dort dauerhaft hinterlegen oder bei jeder Freigabe neu hochladen.</p>
+					<div id="manageInfo"></div>
+				</div>`
+				: ""
+		}`;
+	const expired = (e) => {
+		if (e.status === 401) {
+			out.innerHTML = `<p class="error">Die Abruf-Sitzung ist abgelaufen. Bitte Abruf-Code und Captcha erneut eingeben.</p>`;
+			return true;
+		}
+		return false;
+	};
+	out.querySelectorAll("[data-cert]").forEach((btn) =>
+		btn.addEventListener("click", () =>
+			download("/api/student/csrs/certificate", { method: "POST", token, body: { format: btn.dataset.cert } }).catch((e) => !expired(e) && alert(e.message)),
+		),
+	);
+	renderManage(out, r, token, expired);
+}
+
+function renderManage(out, r, pickupToken, expired) {
+	const checkbox = out.querySelector("#manage");
+	const info = out.querySelector("#manageInfo");
+	if (!checkbox) return;
+	const show = (t) => {
+		if (!t) {
+			info.innerHTML = "";
+			return;
+		}
+		const url = `${location.origin}/ca/${t}`;
+		// Abruf-Sitzung für den Inhaber-Bereich weitergeben (nur in diesem Tab, nur im Arbeitsspeicher der Sitzung)
+		sessionStorage.setItem(`schulCa.owner.${t}`, pickupToken);
+		info.innerHTML = `
+			<p class="notice"><strong>Adresse für deine Klasse:</strong><br><a href="${esc(url)}" class="mono">${esc(url)}</a><br>
+			<span class="muted small">Diese Adresse kannst du an die Klasse weitergeben. Den Abruf-Code bitte <strong>nicht</strong> weitergeben – er schaltet den Inhaber-Bereich frei (zusammen mit einem Captcha).</span></p>
+			<div class="actions"><a class="button-link" href="${esc(url)}#owner">Verwaltung öffnen</a><button type="button" class="secondary" id="copyUrl">Adresse kopieren</button></div>`;
+		info.querySelector("#copyUrl").addEventListener("click", async (e) => {
+			try {
+				await navigator.clipboard.writeText(url);
+				e.target.textContent = "Kopiert!";
+			} catch {
+				// Zwischenablage nicht verfügbar – Adresse steht als Text da.
+			}
+		});
+	};
+	show(r.management?.token);
+	checkbox.addEventListener("change", async () => {
+		const enable = checkbox.checked;
+		if (!enable && !confirm("Verwaltung deaktivieren? Die Klassen-Seite, alle Anfragen und ein hinterlegter Schlüssel werden gelöscht. Bereits ausgestellte Zertifikate bleiben gültig.")) {
+			checkbox.checked = true;
+			return;
+		}
+		try {
+			const res = await call("/api/student/csrs/manage", { method: "POST", token: pickupToken, body: { enable } });
+			show(res.token);
+		} catch (e) {
+			checkbox.checked = !enable;
+			if (!expired(e)) alert(e.message);
 		}
 	});
 }

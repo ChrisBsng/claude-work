@@ -87,3 +87,96 @@ test("Key-Verschlüsselung & Passwort-Hash", async () => {
 	assert.ok(await verifyPasswordHash(h, "geheim123"));
 	assert.ok(!(await verifyPasswordHash(h, "falsch")));
 });
+
+// ---- Endzertifikate ----------------------------------------------------------
+
+import { assertWithinNameConstraints, generateQuickRequest, issueLeaf, parseSanList, permittedDnsOfCert, validateCaKey } from "../src/pki";
+
+async function makeIntermediate(permittedDns: string, keyType: "ec-p384" | "rsa-3072" = "ec-p384") {
+	const root = await generateRoot({ commonName: "Root", org: "Schule", country: "DE", years: 10, keyType });
+	const caKeyAlg = { name: "ECDSA", namedCurve: "P-256", hash: "SHA-256" };
+	const caKeys = (await crypto.subtle.generateKey(caKeyAlg, true, ["sign", "verify"])) as CryptoKeyPair;
+	const caCsr = await x509.Pkcs10CertificateRequestGenerator.create({ name: "CN=Klasse FI-25a", keys: caKeys, signingAlgorithm: caKeyAlg });
+	const issued = await issueIntermediate({
+		rootCertPem: root.info.certPem,
+		rootPkcs8: root.pkcs8,
+		csrPem: caCsr.toString("pem"),
+		subject: { C: "DE", O: "Schule", CN: "Klasse FI-25a" },
+		validityDays: 365,
+		pathLen: 0,
+		permittedDns: parseDnsList(permittedDns),
+	});
+	const caKeyPem = x509.PemConverter.encode((await crypto.subtle.exportKey("pkcs8", caKeys.privateKey)) as ArrayBuffer, "PRIVATE KEY");
+	return { root, caCertPem: issued.certPem, caKeyPem };
+}
+
+test("SAN-Parsing", () => {
+	assert.deepEqual(parseSanList("Web.Schule.example, 10.0.0.5 a@b.example ::1 *.x.example"), [
+		{ type: "dns", value: "web.schule.example" },
+		{ type: "ip", value: "10.0.0.5" },
+		{ type: "email", value: "a@b.example" },
+		{ type: "ip", value: "::1" },
+		{ type: "dns", value: "*.x.example" },
+	]);
+	assert.throws(() => parseSanList("foo bar!"), /Ungültiger SAN/);
+	assert.throws(() => parseSanList("999.1.1.1"), /Ungültiger SAN/);
+	assert.throws(() => parseSanList(Array.from({ length: 21 }, (_, i) => `h${i}.example`).join(",")), /Höchstens/);
+});
+
+test("Name-Constraints-Prüfung", () => {
+	const p = ["schule.example", ".klasse.example"];
+	assertWithinNameConstraints(p, parseSanList("schule.example, www.schule.example, a.klasse.example, *.schule.example"), "x");
+	assert.throws(() => assertWithinNameConstraints(p, parseSanList("evil.example"), "x"), /außerhalb/);
+	assert.throws(() => assertWithinNameConstraints(p, parseSanList("notschule.example"), "x"), /außerhalb/);
+	assert.throws(() => assertWithinNameConstraints(p, parseSanList("klasse.example"), "x"), /außerhalb/, ".klasse.example erlaubt nur Subdomains");
+	assertWithinNameConstraints([], parseSanList("irgendwas.example"), "x");
+});
+
+for (const keyType of ["ec-p384", "rsa-3072"] as const) {
+	test(`Endzertifikat per Quick-Request, ${keyType}: Kette mit OpenSSL verifizieren`, async () => {
+		const { root, caCertPem, caKeyPem } = await makeIntermediate("schule.example", keyType);
+		assert.deepEqual(permittedDnsOfCert(caCertPem), ["schule.example"]);
+		const caPkcs8 = await validateCaKey(caCertPem, caKeyPem);
+
+		const quick = await generateQuickRequest({ cn: "web.schule.example", ou: "FI-25a", email: "max@schule.example", sans: parseSanList("web.schule.example, 192.0.2.7") });
+		assert.match(quick.privateKeyPem, /BEGIN PRIVATE KEY/);
+		const info = await analyzeCsr(quick.csrPem);
+		assert.equal(info.cn, "web.schule.example");
+		assert.deepEqual(info.sans.map((s) => s.value), ["web.schule.example", "192.0.2.7"]);
+
+		const leaf = await issueLeaf({
+			caCertPem,
+			caPkcs8,
+			csrPem: quick.csrPem,
+			subject: { ...info.fields, CN: "web.schule.example", OU: "FI-25a", E: "max@schule.example" },
+			sans: info.sans,
+			validityDays: 90,
+		});
+		if (!hasOpenssl) return;
+		const dir = mkdtempSync(join(tmpdir(), "leaf-"));
+		writeFileSync(join(dir, "root.pem"), root.info.certPem);
+		writeFileSync(join(dir, "int.pem"), caCertPem);
+		writeFileSync(join(dir, "leaf.pem"), leaf.certPem);
+		const out = execFileSync("openssl", ["verify", "-CAfile", join(dir, "root.pem"), "-untrusted", join(dir, "int.pem"), join(dir, "leaf.pem")]).toString();
+		assert.match(out, /OK/);
+		const text = execFileSync("openssl", ["x509", "-in", join(dir, "leaf.pem"), "-noout", "-text"]).toString();
+		assert.match(text, /CA:FALSE/);
+		assert.match(text, /DNS:web\.schule\.example, IP Address:192\.0\.2\.7/);
+		assert.match(text, /TLS Web Server Authentication, TLS Web Client Authentication/);
+		assert.match(text, /emailAddress\s*=\s*max@schule\.example/);
+		assert.match(text, /OU\s*=\s*FI-25a/);
+	});
+}
+
+test("Endzertifikat: SAN außerhalb der Constraints und falscher CA-Key werden abgelehnt", async () => {
+	const a = await makeIntermediate("schule.example");
+	const b = await makeIntermediate("schule.example");
+	await assert.rejects(validateCaKey(a.caCertPem, b.caKeyPem), /gehört nicht/);
+	const pkcs8 = await validateCaKey(a.caCertPem, a.caKeyPem);
+	const q = await generateQuickRequest({ cn: "x.evil.example", sans: parseSanList("x.evil.example") });
+	await assert.rejects(issueLeaf({ caCertPem: a.caCertPem, caPkcs8: pkcs8, csrPem: q.csrPem, subject: { CN: "x.evil.example" }, sans: parseSanList("x.evil.example"), validityDays: 30 }), /außerhalb/);
+	const ok = await generateQuickRequest({ cn: "x.schule.example", sans: parseSanList("x.schule.example") });
+	await assert.rejects(issueLeaf({ caCertPem: a.caCertPem, caPkcs8: pkcs8, csrPem: ok.csrPem, subject: { CN: "x.schule.example" }, sans: [], validityDays: 9999 }), /Gültigkeit/);
+	const long = await issueLeaf({ caCertPem: a.caCertPem, caPkcs8: pkcs8, csrPem: ok.csrPem, subject: { CN: "x.schule.example" }, sans: parseSanList("x.schule.example"), validityDays: 800 });
+	assert.equal(long.truncated, true, "Laufzeit wird auf die der CA gekürzt");
+});
