@@ -52,10 +52,16 @@ Zufall, ohne Login nutzbar), die der Inhaber an die Klasse weitergibt.
   **dauerhaft hinterlegen** (AES-256-GCM, eigener abgeleiteter Schlüssel `ca-key`) oder bei jeder
   Freigabe **neu hochladen** (wird nur im Request verwendet). Ein hinterlegter Schlüssel ist für die
   Betreiber technisch entschlüsselbar – die Oberfläche weist darauf hin.
+* **Pflichtangaben & Subject:** OU und E-Mail sind bei jeder Anfrage (Quick und CSR) und bei der
+  Freigabe Pflicht, damit der Antragsteller identifizierbar ist. C, ST, L und O werden aus dem
+  Zwischenzertifikat vorbelegt; der Inhaber kann sie bei der Freigabe anpassen. Die Laufzeit ist im
+  Freigabeformular begrenzt auf die Restlaufzeit der Zwischen-CA (max. 825 Tage); längere Werte
+  lehnt der Server ab.
 * **Endzertifikate:** CA:FALSE, KeyUsage digitalSignature (+ keyEncipherment bei RSA), EKU
   serverAuth + clientAuth, SAN, SKI/AKI. SANs außerhalb der Name Constraints der Zwischen-CA werden
-  beim Ausstellen abgelehnt. Laufzeit max. 825 Tage und nie länger als die der Zwischen-CA.
-* Die Administration sieht die Verwaltung im CSR-Detail und kann sie deaktivieren (löscht
+  beim Ausstellen abgelehnt. 
+* Die Administration sieht in der CSR-Liste je Zwischenzertifikat ein „+“, das alle verwalteten
+  Zertifikate (CN, OU, E-Mail, SAN, Antragsteller, Status, Laufzeit) aufklappt, und kann die Verwaltung im CSR-Detail deaktivieren (löscht
   Klassen-URL, Anfragen und gespeicherten Schlüssel).
 
 ## Einrichtung

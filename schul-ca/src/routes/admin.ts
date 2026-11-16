@@ -493,3 +493,20 @@ adminRouter.delete("/csrs/:id/management", requireAdmin, async (request: IReques
 	await env.DB.prepare("DELETE FROM ca_resources WHERE csr_id = ?1").bind(Number(request.params.id)).run();
 	return Response.json({ ok: true });
 });
+
+// Alle vom Inhaber verwalteten (angefragten/ausgestellten) Zertifikate einer Zwischen-CA.
+adminRouter.get("/csrs/:id/leaves", requireAdmin, async (request: IRequest, env: Env) => {
+	const { results } = await env.DB.prepare(
+		`SELECT lr.id, lr.kind, lr.requester, lr.subject_cn, lr.subject_ou, lr.subject_email, lr.san, lr.status, lr.reject_reason,
+		        lr.serial_number, lr.not_before, lr.not_after, lr.submitted_at, lr.decided_at
+		 FROM leaf_requests lr JOIN ca_resources m ON m.id = lr.ca_id WHERE m.csr_id = ?1 ORDER BY lr.submitted_at DESC LIMIT 500`,
+	)
+		.bind(Number(request.params.id))
+		.all<Record<string, string | number | null>>();
+	return Response.json({
+		leaves: results.map((l) => ({
+			id: l.id, kind: l.kind, requester: l.requester, cn: l.subject_cn, ou: l.subject_ou, email: l.subject_email, san: l.san, status: l.status,
+			rejectReason: l.reject_reason, serialNumber: l.serial_number, notBefore: l.not_before, notAfter: l.not_after, submittedAt: l.submitted_at,
+		})),
+	});
+});

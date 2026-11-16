@@ -9,7 +9,9 @@ import {
 	certPemToDer,
 	generateQuickRequest,
 	issueLeaf,
+	locationFieldsOfCert,
 	MAX_LEAF_VALIDITY_DAYS,
+	remainingDays,
 	parseSanList,
 	permittedDnsOfCert,
 	PkiError,
@@ -120,7 +122,7 @@ caRouter.get("/:token", async (request: IRequest, env: Env) => {
 			notAfter: ca.not_after,
 			rootName: ca.root_name,
 			permittedDns: permittedDnsOfCert(ca.ca_cert_pem),
-			maxValidityDays: MAX_LEAF_VALIDITY_DAYS,
+			maxValidityDays: validityLimits(ca).maxValidityDays,
 			keyStored: Boolean(ca.key_encrypted),
 			certificates: results.map((r) => serializeLeaf(r)),
 		},
@@ -162,14 +164,32 @@ async function guardPublicSubmit(request: IRequest, env: Env, ca: CaRow, body: {
 }
 
 const cleanText = (v: unknown, max: number) => (typeof v === "string" ? v.trim().slice(0, max) : "");
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+// OU und E-Mail sind Pflicht, damit der Inhaber die Antragsteller identifizieren kann.
+function requireIdentity(ouRaw: unknown, emailRaw: unknown): { error: string } | { ou: string; email: string } {
+	const ou = cleanText(ouRaw, 64);
+	const email = cleanText(emailRaw, 120);
+	if (!ou) return { error: "Bitte die Abteilung/Klasse (OU) angeben – sie dient zur Identifizierung des Antragstellers." };
+	if (!email || !EMAIL_RE.test(email)) return { error: "Bitte eine gültige E-Mail-Adresse angeben – sie dient zur Identifizierung des Antragstellers." };
+	return { ou, email };
+}
+
+// Zulässige Laufzeit für Endzertifikate: höchstens 825 Tage, nie länger als die Restlaufzeit der Zwischen-CA.
+function validityLimits(ca: CaRow) {
+	const max = Math.min(MAX_LEAF_VALIDITY_DAYS, remainingDays(ca.ca_cert_pem));
+	return { maxValidityDays: max, defaultValidityDays: Math.min(365, max) };
+}
 
 // Eigenen CSR einreichen.
 caRouter.post("/:token/requests", async (request: IRequest, env: Env) => {
 	const ca = await loadCa(env, request.params.token);
 	if (!ca) return notFound();
-	const body = await readJson<{ captchaToken?: string; captchaAnswer?: string; requester?: string; csrPem?: string }>(request);
+	const body = await readJson<{ captchaToken?: string; captchaAnswer?: string; requester?: string; csrPem?: string; ou?: string; email?: string }>(request);
 	const denied = await guardPublicSubmit(request, env, ca, body);
 	if (denied) return denied;
+	const identity = requireIdentity(body?.ou, body?.email);
+	if ("error" in identity) return badRequest(identity.error);
 	const csrPem = body?.csrPem?.trim();
 	if (!csrPem) return badRequest("Bitte einen CSR einfügen oder hochladen.");
 	if (csrPem.length > MAX_CSR_BYTES) return badRequest("Der CSR ist zu groß.");
@@ -180,7 +200,7 @@ caRouter.post("/:token/requests", async (request: IRequest, env: Env) => {
 			`INSERT INTO leaf_requests (ca_id, kind, requester, csr_pem, key_info, subject_cn, subject_ou, subject_email, san)
 			 VALUES (?1, 'csr', ?2, ?3, ?4, ?5, ?6, ?7, ?8) RETURNING id`,
 		)
-			.bind(ca.id, cleanText(body?.requester, 80), csrPem, info.keyInfo, (info.cn ?? "").slice(0, 64), info.fields.OU ?? "", "", sanToString(info.sans))
+			.bind(ca.id, cleanText(body?.requester, 80), csrPem, info.keyInfo, (info.cn ?? "").slice(0, 64), identity.ou, identity.email, sanToString(info.sans))
 			.first<{ id: number }>();
 		return Response.json({ id: row!.id, subject: info.subject }, { status: 201 });
 	} catch (e) {
@@ -198,14 +218,14 @@ caRouter.post("/:token/quick", async (request: IRequest, env: Env) => {
 	const denied = await guardPublicSubmit(request, env, ca, body);
 	if (denied) return denied;
 	const cn = cleanText(body?.cn, 64);
-	const ou = cleanText(body?.ou, 64);
-	const email = cleanText(body?.email, 120);
 	if (!cn) return badRequest("Bitte den Common Name (CN) angeben, z. B. den Hostnamen.");
-	if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return badRequest("Bitte eine gültige E-Mail-Adresse angeben.");
+	const identity = requireIdentity(body?.ou, body?.email);
+	if ("error" in identity) return badRequest(identity.error);
+	const { ou, email } = identity;
 	try {
 		const sans = parseSanList(body?.san);
 		if (!sans.length) return badRequest("Bitte mindestens einen SAN-Eintrag angeben (DNS-Name, IP oder E-Mail), z. B. den Hostnamen.");
-		const quick = await generateQuickRequest({ cn, ou: ou || undefined, email: email || undefined, sans });
+		const quick = await generateQuickRequest({ cn, ou, email, sans });
 		const row = await env.DB.prepare(
 			`INSERT INTO leaf_requests (ca_id, kind, requester, csr_pem, key_info, subject_cn, subject_ou, subject_email, san)
 			 VALUES (?1, 'quick', ?2, ?3, ?4, ?5, ?6, ?7, ?8) RETURNING id`,
@@ -230,7 +250,12 @@ caRouter.get("/:token/owner", async (request: IRequest, env: Env) => {
 	const denied = await requireOwner(request, env, ca);
 	if (denied) return denied;
 	const { results } = await env.DB.prepare(`SELECT ${LEAF_COLUMNS} FROM leaf_requests WHERE ca_id = ?1 ORDER BY submitted_at DESC LIMIT 500`).bind(ca.id).all<LeafRow>();
-	return Response.json({ keyStored: Boolean(ca.key_encrypted), maxValidityDays: MAX_LEAF_VALIDITY_DAYS, requests: results.map((r) => serializeLeaf(r, true)) });
+	return Response.json({
+		keyStored: Boolean(ca.key_encrypted),
+		...validityLimits(ca),
+		defaults: locationFieldsOfCert(ca.ca_cert_pem), // C, ST, L, O aus dem Zwischenzertifikat
+		requests: results.map((r) => serializeLeaf(r, true)),
+	});
 });
 
 // Private Key der Zwischen-CA dauerhaft hinterlegen (verschlüsselt).
@@ -273,13 +298,37 @@ caRouter.post("/:token/owner/requests/:id/approve", async (request: IRequest, en
 	if (!req) return badRequest("Anfrage nicht gefunden.", 404);
 	if (req.status === "issued") return badRequest("Für diese Anfrage wurde bereits ein Zertifikat ausgestellt.", 409);
 
-	const body = await readJson<{ cn?: string; ou?: string; email?: string; san?: string; validityDays?: number; keyPem?: string }>(request);
+	const body = await readJson<{
+		cn?: string;
+		ou?: string;
+		email?: string;
+		san?: string;
+		validityDays?: number;
+		keyPem?: string;
+		subject?: { C?: string; ST?: string; L?: string; O?: string };
+	}>(request);
 	const cn = cleanText(body?.cn, 64);
-	const ou = cleanText(body?.ou, 64);
-	const email = cleanText(body?.email, 120);
-	const validityDays = Number(body?.validityDays ?? 365);
 	if (!cn) return badRequest("Common Name (CN) ist erforderlich.");
-	if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return badRequest("Ungültige E-Mail-Adresse.");
+	const identity = requireIdentity(body?.ou, body?.email);
+	if ("error" in identity) return badRequest(identity.error);
+	const { ou, email } = identity;
+
+	// C/ST/L/O: Vorbelegung aus dem Zwischenzertifikat, vom Inhaber anpassbar (leer = weglassen).
+	const defaults = locationFieldsOfCert(ca.ca_cert_pem);
+	const loc = { ...defaults };
+	for (const k of ["C", "ST", "L", "O"] as const) {
+		const v = body?.subject?.[k];
+		if (typeof v === "string") loc[k] = v.trim().slice(0, 64);
+	}
+	loc.C = loc.C.toUpperCase();
+	if (loc.C && !/^[A-Z]{2}$/.test(loc.C)) return badRequest("Land (C): zweistelliger ISO-Code, z. B. DE.");
+
+	const limits = validityLimits(ca);
+	const validityDays = Number(body?.validityDays ?? limits.defaultValidityDays);
+	if (!Number.isInteger(validityDays) || validityDays < 1) return badRequest("Ungültige Gültigkeitsdauer.");
+	if (validityDays > limits.maxValidityDays) {
+		return badRequest(`Die Laufzeit darf höchstens ${limits.maxValidityDays} Tage betragen (Restlaufzeit der Zwischenzertifizierungsstelle bzw. Maximum ${MAX_LEAF_VALIDITY_DAYS} Tage).`);
+	}
 
 	try {
 		const sans = parseSanList(body?.san);
@@ -294,12 +343,11 @@ caRouter.post("/:token/owner/requests/:id/approve", async (request: IRequest, en
 			if (!body?.keyPem || body.keyPem.length > MAX_KEY_BYTES) return badRequest("Es ist kein Schlüssel hinterlegt. Bitte den Private Key der Zwischen-CA beim Freigeben angeben.");
 			pkcs8 = await validateCaKey(ca.ca_cert_pem, body.keyPem);
 		}
-		const info = await analyzeCsr(req.csr_pem);
 		const issued = await issueLeaf({
 			caCertPem: ca.ca_cert_pem,
 			caPkcs8: pkcs8,
 			csrPem: req.csr_pem,
-			subject: { C: info.fields.C, ST: info.fields.ST, L: info.fields.L, O: info.fields.O, OU: ou || undefined, CN: cn, E: email || undefined },
+			subject: { C: loc.C || undefined, ST: loc.ST || undefined, L: loc.L || undefined, O: loc.O || undefined, OU: ou, CN: cn, E: email },
 			sans,
 			validityDays,
 		});

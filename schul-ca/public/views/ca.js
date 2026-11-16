@@ -56,13 +56,14 @@ export async function renderCa(root, token) {
 				<p class="muted small">Der Schlüssel und der CSR werden hier für dich erzeugt (EC P-256). Du kannst den <strong>privaten Schlüssel nur ein einziges Mal</strong> herunterladen – er wird nicht gespeichert.</p>
 				<div class="grid">
 					<label>Common Name (CN) *<input name="cn" required maxlength="64" placeholder="web.klasse.example" /></label>
-					<label>Abteilung (OU)<input name="ou" maxlength="64" placeholder="z. B. FI-25a" /></label>
+					<label>Abteilung / Klasse (OU) *<input name="ou" required maxlength="64" placeholder="z. B. FI-25a" /></label>
 				</div>
 				<label>SAN – Hostnamen / IPs / E-Mail (kommagetrennt) *<input name="san" required placeholder="web.klasse.example, 192.0.2.10" /></label>
 				<div class="grid">
-					<label>E-Mail (E)<input name="email" type="email" maxlength="120" placeholder="vorname.nachname@schule.example" /></label>
+					<label>E-Mail (E) *<input name="email" type="email" required maxlength="120" placeholder="vorname.nachname@schule.example" /></label>
 					<label>Dein Name (für den Inhaber)<input name="requester" maxlength="80" /></label>
 				</div>
+				<p class="muted small">OU und E-Mail sind Pflicht: Der Inhaber der Zwischenzertifizierungsstelle muss dich als Antragsteller identifizieren können. Organisation, Land und Ort werden automatisch aus dem Zwischenzertifikat übernommen.</p>
 				<div data-captcha></div>
 				<p class="error" data-error role="alert"></p>
 				<button type="submit">Quick-Zertifikat anfordern</button>
@@ -73,8 +74,12 @@ export async function renderCa(root, token) {
 					<textarea name="csr" rows="7" required spellcheck="false" placeholder="-----BEGIN CERTIFICATE REQUEST-----"></textarea>
 				</label>
 				<input type="file" id="csrFile" accept=".csr,.pem,.txt,.req" />
+				<div class="grid">
+					<label>Abteilung / Klasse (OU) *<input name="ou" required maxlength="64" placeholder="z. B. FI-25a" /></label>
+					<label>E-Mail (E) *<input name="email" type="email" required maxlength="120" placeholder="vorname.nachname@schule.example" /></label>
+				</div>
 				<label>Dein Name (für den Inhaber)<input name="requester" maxlength="80" /></label>
-				<p class="muted small">SAN-Einträge werden aus dem CSR übernommen und vom Inhaber geprüft. Nur den CSR hochladen, <strong>niemals den Private Key</strong>.</p>
+				<p class="muted small">OU und E-Mail sind Pflicht (Identifizierung des Antragstellers). Organisation, Land und Ort werden aus dem Zwischenzertifikat übernommen. SAN-Einträge werden aus dem CSR übernommen und vom Inhaber geprüft. Nur den CSR hochladen, <strong>niemals den Private Key</strong>.</p>
 				<div data-captcha></div>
 				<p class="error" data-error role="alert"></p>
 				<button type="submit">CSR einreichen</button>
@@ -176,7 +181,7 @@ export async function renderCa(root, token) {
 		const err = csrForm.querySelector("[data-error]");
 		err.textContent = "";
 		try {
-			await call(`${base}/requests`, { method: "POST", body: { csrPem: csrForm.csr.value, requester: csrForm.requester.value, ...captchas.csr.values() } });
+			await call(`${base}/requests`, { method: "POST", body: { csrPem: csrForm.csr.value, ou: csrForm.ou.value, email: csrForm.email.value, requester: csrForm.requester.value, ...captchas.csr.values() } });
 			csrForm.reset();
 			err.innerHTML = `<span class="ok">CSR eingereicht. Der Inhaber prüft die Anfrage – danach erscheint das Zertifikat in der Tabelle.</span>`;
 			await refreshPublic();
@@ -276,12 +281,24 @@ export async function renderCa(root, token) {
 			<form class="card" id="reviewForm">
 				<h3>Anfrage prüfen: ${esc(req.cn)}</h3>
 				<p class="notice">Vor der Freigabe prüfen, ob die Anfrage berechtigt ist (${esc(KIND[req.kind])}${req.requester ? ` von ${esc(req.requester)}` : ""}). Die SAN-Einträge müssen innerhalb der erlaubten Domains liegen.</p>
+				<h4>Antragsteller (Pflicht)</h4>
 				<div class="grid">
 					<label>Common Name (CN)<input name="cn" required maxlength="64" value="${esc(req.cn)}" /></label>
-					<label>Abteilung (OU)<input name="ou" maxlength="64" value="${esc(req.ou)}" /></label>
-					<label>E-Mail (E)<input name="email" maxlength="120" value="${esc(req.email)}" /></label>
-					<label>Gültigkeit (Tage, max. ${state.maxValidityDays})<input name="validityDays" type="number" min="1" max="${state.maxValidityDays}" value="365" required /></label>
+					<label>Abteilung / Klasse (OU) *<input name="ou" required maxlength="64" value="${esc(req.ou)}" /></label>
+					<label>E-Mail (E) *<input name="email" type="email" required maxlength="120" value="${esc(req.email)}" /></label>
 				</div>
+				<h4>Organisation &amp; Standort (aus dem Zwischenzertifikat, anpassbar)</h4>
+				<div class="grid">
+					<label>Organisation (O)<input name="O" maxlength="64" value="${esc(state.defaults.O)}" /></label>
+					<label>Land (C)<input name="C" maxlength="2" value="${esc(state.defaults.C)}" /></label>
+					<label>Bundesland (ST)<input name="ST" maxlength="64" value="${esc(state.defaults.ST)}" /></label>
+					<label>Ort (L)<input name="L" maxlength="64" value="${esc(state.defaults.L)}" /></label>
+				</div>
+				<h4>Laufzeit</h4>
+				<div class="grid">
+					<label>Gültigkeit (Tage, max. ${state.maxValidityDays})<input name="validityDays" type="number" min="1" max="${state.maxValidityDays}" value="${state.defaultValidityDays}" required /></label>
+				</div>
+				<p class="muted small">Die Laufzeit kann nicht länger sein als die Restlaufzeit der Zwischenzertifizierungsstelle (${state.maxValidityDays} Tage${state.maxValidityDays >= 825 ? ", Maximum" : ""}).</p>
 				<label>SAN (kommagetrennt)<input name="san" value="${esc(req.san)}" /></label>
 				${state.keyStored ? "" : `<label>Private Key der Zwischenzertifizierungsstelle (PKCS#8) – wird nicht gespeichert<textarea name="key" rows="4" spellcheck="false" required placeholder="-----BEGIN PRIVATE KEY-----"></textarea></label>`}
 				<label>Ablehnungsgrund (nur beim Ablehnen)<input name="reason" maxlength="300" /></label>
@@ -296,9 +313,12 @@ export async function renderCa(root, token) {
 			try {
 				const res = await fetchOwner(`/requests/${req.id}/approve`, {
 					method: "POST",
-					body: { cn: form.cn.value, ou: form.ou.value, email: form.email.value, san: form.san.value, validityDays: Number(form.validityDays.value), ...(form.key ? { keyPem: form.key.value } : {}) },
+					body: {
+						cn: form.cn.value, ou: form.ou.value, email: form.email.value, san: form.san.value, validityDays: Number(form.validityDays.value),
+						subject: { O: form.O.value, C: form.C.value, ST: form.ST.value, L: form.L.value },
+						...(form.key ? { keyPem: form.key.value } : {}),
+					},
 				});
-				if (res.truncated) alert("Hinweis: Die Laufzeit wurde auf das Ablaufdatum der Zwischenzertifizierungsstelle gekürzt.");
 				await loadOwner();
 				await refreshPublic();
 			} catch (err) {

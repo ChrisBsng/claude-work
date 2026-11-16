@@ -538,3 +538,16 @@ export async function generateQuickRequest(p: { cn: string; ou?: string; email?:
 	const pkcs8 = (await crypto.subtle.exportKey("pkcs8", keys.privateKey)) as ArrayBuffer;
 	return { csrPem: csr.toString("pem"), privateKeyPem: pem(pkcs8, "PRIVATE KEY"), keyInfo: "EC P-256" };
 }
+
+// Standort-/Organisationsfelder (C, ST, L, O) einer Zertifikats-Subject – Vorbelegung für
+// die Endzertifikate einer Zwischen-CA.
+export function locationFieldsOfCert(certPem: string): { C: string; ST: string; L: string; O: string } {
+	const cert = new x509.X509Certificate(certPem);
+	const f = (n: string) => (cert.subjectName.getField(n)[0] as string | undefined) ?? "";
+	return { C: f("C"), ST: f("ST"), L: f("L"), O: f("O") };
+}
+
+export function remainingDays(certPem: string): number {
+	const cert = new x509.X509Certificate(certPem);
+	return Math.max(0, Math.floor((cert.notAfter.getTime() - Date.now()) / 86_400_000));
+}

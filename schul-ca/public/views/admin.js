@@ -112,11 +112,12 @@ async function renderCsrs(panel, root) {
 		${
 			csrs.length
 				? `<table>
-			<thead><tr><th>Klasse</th><th>Kontakt</th><th>Subject (CSR)</th><th>Key</th><th>Stamm-CA</th><th>Eingereicht</th><th>Status</th><th></th></tr></thead>
+			<thead><tr><th></th><th>Klasse</th><th>Kontakt</th><th>Subject (CSR)</th><th>Key</th><th>Stamm-CA</th><th>Eingereicht</th><th>Status</th><th></th></tr></thead>
 			<tbody>${csrs
 				.map(
-					(c) => `<tr>
-				<td><strong>${esc(c.label)}</strong></td><td class="small">${esc(c.contactPerson || "–")}<br><span class="muted">${esc(contactLabel(c))}</span></td><td class="small">${esc(c.subject)}</td><td class="small">${esc(c.keyInfo)}</td>
+					(c) => `<tr data-row="${c.id}">
+				<td class="expander">${c.management ? `<button class="expand" data-expand="${c.id}" aria-expanded="false" title="Verwaltete Zertifikate anzeigen">+</button>` : ""}</td>
+				<td><strong>${esc(c.label)}</strong>${c.management ? `<div class="muted small">${c.management.requests} verwaltete Zertifikate</div>` : ""}</td><td class="small">${esc(c.contactPerson || "–")}<br><span class="muted">${esc(contactLabel(c))}</span></td><td class="small">${esc(c.subject)}</td><td class="small">${esc(c.keyInfo)}</td>
 				<td class="small">${esc(c.rootName)}</td><td class="small">${esc(formatDate(c.submittedAt))}</td>
 				<td><span class="badge status-${esc(c.status)}">${esc(STATUS_LABELS[c.status])}</span></td>
 				<td><button class="secondary" data-open="${c.id}">Öffnen</button></td></tr>`,
@@ -129,6 +130,32 @@ async function renderCsrs(panel, root) {
 		b.addEventListener("click", () => {
 			csrFilter = b.dataset.filter;
 			renderShell(root);
+		}),
+	);
+	panel.querySelectorAll("[data-expand]").forEach((b) =>
+		b.addEventListener("click", async () => {
+			const row = b.closest("tr");
+			const open = b.getAttribute("aria-expanded") === "true";
+			row.nextElementSibling?.matches(".leaf-row") && row.nextElementSibling.remove();
+			b.setAttribute("aria-expanded", String(!open));
+			b.textContent = open ? "+" : "−";
+			if (open) return;
+			const detail = document.createElement("tr");
+			detail.className = "leaf-row";
+			detail.innerHTML = `<td></td><td colspan="8"><p class="muted small">Lädt…</p></td>`;
+			row.after(detail);
+			try {
+				const { leaves } = await api(`/csrs/${b.dataset.expand}/leaves`);
+				detail.firstElementChild.nextElementSibling.innerHTML = leaves.length
+					? `<table class="sub"><thead><tr><th>Art</th><th>CN</th><th>OU</th><th>E-Mail</th><th>SAN</th><th>Antragsteller</th><th>Status</th><th>Gültig bis</th></tr></thead><tbody>${leaves
+							.map(
+								(l) => `<tr><td>${l.kind === "quick" ? "Quick" : "CSR"}</td><td><strong>${esc(l.cn)}</strong></td><td class="small">${esc(l.ou || "–")}</td><td class="small">${esc(l.email || "–")}</td><td class="small mono">${esc(l.san || "–")}</td><td class="small">${esc(l.requester || "–")}</td><td><span class="badge status-${esc(l.status)}">${esc(STATUS_LABELS[l.status] ?? l.status)}</span>${l.rejectReason ? `<div class="muted small">${esc(l.rejectReason)}</div>` : ""}</td><td class="small">${esc(l.status === "issued" ? formatDay(l.notAfter) : "–")}</td></tr>`,
+							)
+							.join("")}</tbody></table>`
+					: `<p class="muted small">Für diese Zwischenzertifizierungsstelle gibt es noch keine Anfragen.</p>`;
+			} catch (e) {
+				detail.firstElementChild.nextElementSibling.innerHTML = `<p class="error">${esc(e.message)}</p>`;
+			}
 		}),
 	);
 	panel.querySelectorAll("[data-open]").forEach((b) =>
