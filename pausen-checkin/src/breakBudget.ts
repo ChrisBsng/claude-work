@@ -18,6 +18,18 @@ export function localDateString(date: Date, timeZone: string): string {
 	return new Intl.DateTimeFormat("en-CA", { timeZone, year: "numeric", month: "2-digit", day: "2-digit" }).format(date);
 }
 
+// Ein check_out während einer bereits laufenden Pause desselben lokalen
+// Tages darf deren Startzeit NICHT überschreiben – sonst würde die bis dahin
+// angefallene Pausenzeit verworfen (Doppelklick, parallele Requests oder
+// gezielt wiederholtes {"status":"on_break"} → Pausenbudget "füllt sich
+// wieder auf"). Liegt die offene Pause an einem anderen Tag (vergessener
+// Check-in), startet der neue check_out wie bisher eine frische Pause; die
+// alte bleibt unberechnet bei ihrem Ursprungstag.
+function startsNewBreak(openBreakStart: Date | null, occurredAt: Date, timezone: string): boolean {
+	if (!openBreakStart) return true;
+	return localDateString(openBreakStart, timezone) !== localDateString(occurredAt, timezone);
+}
+
 // events müssen chronologisch aufsteigend sortiert sein (älteste zuerst).
 // Eine Pause zählt vollständig zu dem Tag, an dem sie BEGONNEN hat
 // (lokales Datum in timezone) – unabhängig davon, wann/ob sie endet.
@@ -38,7 +50,7 @@ export function computeUsedMinutesForDate(
 	for (const event of events) {
 		const occurredAt = new Date(event.occurred_at);
 		if (event.event_type === "check_out") {
-			openBreakStart = occurredAt;
+			if (startsNewBreak(openBreakStart, occurredAt, timezone)) openBreakStart = occurredAt;
 		} else if (event.event_type === "check_in" && openBreakStart) {
 			if (localDateString(openBreakStart, timezone) === targetDate) {
 				usedMs += occurredAt.getTime() - openBreakStart.getTime();
@@ -70,7 +82,7 @@ export function computeUsedMinutesByDate(events: CheckinEventRow[], timezone: st
 	for (const event of events) {
 		const occurredAt = new Date(event.occurred_at);
 		if (event.event_type === "check_out") {
-			openBreakStart = occurredAt;
+			if (startsNewBreak(openBreakStart, occurredAt, timezone)) openBreakStart = occurredAt;
 		} else if (event.event_type === "check_in" && openBreakStart) {
 			const day = localDateString(openBreakStart, timezone);
 			msByDate.set(day, (msByDate.get(day) ?? 0) + (occurredAt.getTime() - openBreakStart.getTime()));
@@ -108,14 +120,15 @@ export function computeBreakBudgetFromEvents(
 }
 
 // Gesamte Pausenzeit über die komplette Event-Historie hinweg, ohne
-// Tagesgrenze – für einfache "Gesamtsumme bisher"-Statistiken.
-export function computeTotalBreakMinutes(events: CheckinEventRow[]): number {
+// Tagesgrenze – für einfache "Gesamtsumme bisher"-Statistiken. timezone wird
+// nur benötigt, um doppelte check_outs wie in den Tagesfunktionen zu behandeln.
+export function computeTotalBreakMinutes(events: CheckinEventRow[], timezone: string): number {
 	let usedMs = 0;
 	let openBreakStart: Date | null = null;
 	for (const event of events) {
 		const occurredAt = new Date(event.occurred_at);
 		if (event.event_type === "check_out") {
-			openBreakStart = occurredAt;
+			if (startsNewBreak(openBreakStart, occurredAt, timezone)) openBreakStart = occurredAt;
 		} else if (event.event_type === "check_in" && openBreakStart) {
 			usedMs += occurredAt.getTime() - openBreakStart.getTime();
 			openBreakStart = null;
@@ -134,36 +147,39 @@ export function addDaysToDateString(dateStr: string, days: number): string {
 	return date.toISOString().slice(0, 10);
 }
 
-const RECENT_EVENTS_PER_PARTICIPANT = 20;
-
-export async function fetchRecentParticipantEvents(db: D1Database, participantId: number): Promise<CheckinEventRow[]> {
-	const { results } = await db
-		.prepare(
-			`SELECT event_type, occurred_at FROM checkin_events
-			 WHERE participant_id = ?1
-			 ORDER BY occurred_at DESC
-			 LIMIT ?2`,
-		)
-		.bind(participantId, RECENT_EVENTS_PER_PARTICIPANT)
-		.all<CheckinEventRow>();
-	return results.reverse();
-}
-
 // Nur Events der letzten 2 Tage (UTC) sind für den heutigen Live-Status
 // relevant (siehe computeUsedMinutesForDate: eine Pause zählt nur zu dem
 // Tag, an dem sie begann, und eine offene Pause nur dann bis "jetzt", wenn
 // sie heute begann). 2 Tage statt 1 sind eine großzügige, zeitzonenfeste
 // Marge (deckt auch extreme UTC-Offsets ab), ohne das Verhalten zu ändern.
 // Diese Grenze erlaubt einen indexgestützten Range-Scan über
-// idx_checkin_events_course_occurred statt eines vollen Tabellen-Scans der
-// kompletten Kurs-Historie – entscheidend, da diese Funktion alle 5s von
-// jedem offenen Dashboard-Tab aufgerufen wird.
+// idx_checkin_events_*_occurred statt eines vollen Tabellen-Scans der
+// kompletten Historie – entscheidend, da diese Abfragen alle 5s von jedem
+// offenen Tab aufgerufen werden.
+//
+// Bewusst KEIN Limit auf "die letzten N Events": Früher wurden nur die
+// letzten 20 Events gelesen. Wer genug (auch wirkungslose) Events erzeugte,
+// schob damit seine echten Pausen des Tages aus dem Fenster und das
+// Pausenbudget war wieder voll. Das Zeitfenster ist manipulationssicher;
+// die Eventmenge pro Teilnehmer und Tag begrenzt das Toggle-Throttling
+// (siehe routes/checkin.ts).
 function recentCutoffIso(): string {
 	return new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString();
 }
 
-// Eine Abfrage für den gesamten Kurs (statt einer Query pro Teilnehmer),
-// gruppiert per Fensterfunktion auf die letzten N Events je Teilnehmer.
+export async function fetchRecentParticipantEvents(db: D1Database, participantId: number): Promise<CheckinEventRow[]> {
+	const { results } = await db
+		.prepare(
+			`SELECT event_type, occurred_at FROM checkin_events
+			 WHERE participant_id = ?1 AND occurred_at >= ?2
+			 ORDER BY occurred_at ASC`,
+		)
+		.bind(participantId, recentCutoffIso())
+		.all<CheckinEventRow>();
+	return results;
+}
+
+// Eine Abfrage für den gesamten Kurs (statt einer Query pro Teilnehmer).
 // Für die häufig gepollte Live-Ansicht (aktueller Status/heutiges Budget).
 export async function fetchRecentCourseEventsByParticipant(
 	db: D1Database,
@@ -171,15 +187,11 @@ export async function fetchRecentCourseEventsByParticipant(
 ): Promise<Map<number, CheckinEventRow[]>> {
 	const { results } = await db
 		.prepare(
-			`SELECT participant_id, event_type, occurred_at FROM (
-				SELECT participant_id, event_type, occurred_at,
-					ROW_NUMBER() OVER (PARTITION BY participant_id ORDER BY occurred_at DESC) AS rn
-				FROM checkin_events
-				WHERE course_id = ?1 AND occurred_at >= ?3
-			) WHERE rn <= ?2
-			ORDER BY participant_id ASC, occurred_at ASC`,
+			`SELECT participant_id, event_type, occurred_at FROM checkin_events
+			 WHERE course_id = ?1 AND occurred_at >= ?2
+			 ORDER BY participant_id ASC, occurred_at ASC`,
 		)
-		.bind(courseId, RECENT_EVENTS_PER_PARTICIPANT, recentCutoffIso())
+		.bind(courseId, recentCutoffIso())
 		.all<CheckinEventRow & { participant_id: number }>();
 
 	return groupByParticipant(results);

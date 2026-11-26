@@ -313,7 +313,7 @@ adminRouter.get("/courses/:id/stats", requireReadAccess, async (request: IReques
 
 	const eventsByParticipant = await fetchAllCourseEventsByParticipant(env.DB, course.id);
 	const totalBreakMinutes = participants.reduce(
-		(sum, p) => sum + computeTotalBreakMinutes(eventsByParticipant.get(p.id) ?? []),
+		(sum, p) => sum + computeTotalBreakMinutes(eventsByParticipant.get(p.id) ?? [], course.timezone),
 		0,
 	);
 
