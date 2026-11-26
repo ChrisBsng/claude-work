@@ -257,10 +257,26 @@ checkinRouter.get("/:checkinCode/me", async (request: IRequest, env: Env) => {
 	return Response.json(await loadParticipantView(env.DB, auth.participant, course));
 });
 
+// Mindestabstand zwischen zwei Status-Events eines Teilnehmers. Verhindert,
+// dass per Skript in kurzer Zeit tausende Events erzeugt werden, die die
+// (alle 5s gepollte) Live-Berechnung aufblähen (CPU-Limit der Workers).
+const MIN_TOGGLE_INTERVAL_MS = 2000;
+
 // Ohne body: normaler Toggle (present<->on_break) anhand des aktuellen,
 // tagesbezogenen Status. Mit body.status: expliziter Zielstatus – nötig,
 // wenn der aktuelle Status "unknown" ist (erste Aktion des Tages), da man
 // von dort nicht "umschalten" kann, sondern explizit wählen muss.
+//
+// Schutz gegen Manipulation des Pausenbudgets:
+// - Ist der gewünschte Status bereits der aktuelle, wird KEIN Event
+//   geschrieben (ein zweiter check_out würde sonst die laufende Pause neu
+//   starten und die bisherige Pausenzeit verwerfen).
+// - Das INSERT ist bedingt (optimistische Sperre): Es schreibt nur, wenn das
+//   neueste Event des Teilnehmers noch dasselbe ist wie beim Lesen des
+//   Status. Zwei parallele Requests (Doppelklick, Skript) können so nicht
+//   beide denselben Wechsel eintragen.
+// In allen abgelehnten Fällen kommt der unveränderte aktuelle Stand zurück
+// (idempotent, kein Fehler für versehentliche Doppelklicks).
 checkinRouter.post("/:checkinCode/toggle", async (request: IRequest, env: Env) => {
 	const course = await getActiveCourseByCheckinCode(env.DB, request.params.checkinCode);
 	if (!course) {
@@ -274,22 +290,38 @@ checkinRouter.post("/:checkinCode/toggle", async (request: IRequest, env: Env) =
 	const body = (await request.json().catch(() => null)) as { status?: string } | null;
 	const requestedStatus = body?.status === "present" || body?.status === "on_break" ? body.status : null;
 
+	// Reihenfolge wichtig: das neueste Event VOR dem Status lesen. Kommt
+	// dazwischen ein anderes Event hinzu, schlägt das bedingte INSERT fehl,
+	// statt auf Basis eines veralteten Status zu schreiben.
+	const latest = await env.DB.prepare("SELECT MAX(occurred_at) AS last FROM checkin_events WHERE participant_id = ?1")
+		.bind(participant.id)
+		.first<{ last: string | null }>();
+	const lastOccurredAt = latest?.last ?? null;
+
 	const before = await loadParticipantView(env.DB, participant, course);
 	const newStatus = requestedStatus ?? (before.participant.status === "on_break" ? "present" : "on_break");
+	if (newStatus === before.participant.status) {
+		return Response.json(before);
+	}
+	if (lastOccurredAt && Date.now() - new Date(lastOccurredAt).getTime() < MIN_TOGGLE_INTERVAL_MS) {
+		return Response.json(before);
+	}
 	const eventType = newStatus === "on_break" ? "check_out" : "check_in";
 
 	await env.DB.batch([
-		env.DB.prepare("UPDATE participants SET status = ?1, status_changed_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?2").bind(
-			newStatus,
-			participant.id,
-		),
-		env.DB.prepare("INSERT INTO checkin_events (participant_id, course_id, event_type) VALUES (?1, ?2, ?3)").bind(
-			participant.id,
-			course.id,
-			eventType,
-		),
+		env.DB.prepare(
+			`INSERT INTO checkin_events (participant_id, course_id, event_type)
+			 SELECT ?1, ?2, ?3
+			 WHERE (SELECT MAX(occurred_at) FROM checkin_events WHERE participant_id = ?1) IS ?4`,
+		).bind(participant.id, course.id, eventType, lastOccurredAt),
+		env.DB.prepare(
+			`UPDATE participants SET status = ?1, status_changed_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+			 WHERE id = ?2`,
+		).bind(newStatus, participant.id),
 	]);
 
+	// Hat ein paralleler Request gewonnen, wurde nichts eingefügt – der
+	// frisch geladene Stand spiegelt dann dessen Ergebnis wider.
 	return Response.json(await loadParticipantView(env.DB, participant, course));
 });
 
